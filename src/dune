@@ -1,0 +1,3 @@
+(library (name websocket)
+ (preprocess (pps ppx_jane -dont-check-doc-comments-attachment))
+ (libraries async core_kernel.binary_packing cryptokit))
