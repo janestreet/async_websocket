@@ -1,353 +1,127 @@
 open Core
 open Async
+module Connection_close_reason = Connection_close_reason
 
 module Websocket_role = struct
-  type t = Client | Server [@@deriving sexp_of]
+  type t =
+    | Client
+    | Server
+  [@@deriving sexp_of]
 
   (*  https://tools.ietf.org/html/rfc6455#section-5.3 *)
   let should_mask = function
     | Client -> true
     | Server -> false
-end
-
-(* https://tools.ietf.org/html/rfc6455#section-7.4 *)
-module Connection_close_reason : sig
-  type t =
-    | Normal_closure
-    | Endpoint_going_away
-    | Protocol_error
-    | Cannot_accept_data
-    | Reserved_0
-    | No_status_code
-    | Closed_abnormally
-    | Invalid_message_sent
-    | Policy_violation
-    | Message_too_large
-    | Invalid_handshake
-    | Unexpected_condition
-    | Tls_handshake_failure
-  [@@deriving sexp_of]
-
-  val of_int : int -> t Or_error.t
-  val to_int : t -> int
-end = struct
-  module T = struct
-    type t =
-      | Normal_closure
-      | Endpoint_going_away
-      | Protocol_error
-      | Cannot_accept_data
-      | Reserved_0
-      | No_status_code
-      | Closed_abnormally
-      | Invalid_message_sent
-      | Policy_violation
-      | Message_too_large
-      | Invalid_handshake
-      | Unexpected_condition
-      | Tls_handshake_failure
-    [@@deriving sexp, compare, enumerate]
-  end
-  include T
-  include Comparable.Make(T)
-
-  let to_int = function
-    | Normal_closure        -> 1000
-    | Endpoint_going_away   -> 1001
-    | Protocol_error        -> 1002
-    | Cannot_accept_data    -> 1003
-    | Reserved_0            -> 1004
-    | No_status_code        -> 1005
-    | Closed_abnormally     -> 1006
-    | Invalid_message_sent  -> 1007
-    | Policy_violation      -> 1008
-    | Message_too_large     -> 1009
-    | Invalid_handshake     -> 1010
-    | Unexpected_condition  -> 1011
-    | Tls_handshake_failure -> 1015
   ;;
-
-  let of_int_map =
-    List.map all ~f:(fun t -> to_int t, t)
-    |> Int.Map.of_alist_exn
-  ;;
-
-  let of_int code =
-    match Core.Map.find of_int_map code with
-    | Some t -> Ok t
-    | None -> error_s [%message "Unknown close code" (code : int)]
 end
 
 (* RFC 6455: The WebSocket Protocol: http://tools.ietf.org/html/rfc6455 *)
 
-type raw = {
-  reader : Reader.t;
-  writer : Writer.t;
-  closed : (Connection_close_reason.t * string) Ivar.t;
-}
+type raw =
+  { reader : Reader.t
+  ; writer : Writer.t
+  ; closed : (Connection_close_reason.t * string * Info.t option) Ivar.t
+  }
 
-type t = {
-  raw   : raw;
-  pipes : string Pipe.Reader.t * string Pipe.Writer.t;
-} [@@deriving fields]
+type t =
+  { raw : raw
+  ; pipes : string Pipe.Reader.t * string Pipe.Writer.t
+  }
+[@@deriving fields]
 
-module Opcode = struct
-  type t =
-    | Continuation
-    | Text
-    | Binary
-    | Close
-    | Ping
-    | Pong
-    | Ctrl of int
-    | Nonctrl of int
-
-  let of_int i = match i land 0xf with
-    | 0x0                   -> Continuation
-    | 0x1                   -> Text
-    | 0x2                   -> Binary
-    | 0x8                   -> Close
-    | 0x9                   -> Ping
-    | 0xA                   -> Pong
-    | i when i > 2 && i < 8 -> Nonctrl i
-    | i                     -> Ctrl i
-  ;;
-
-  let to_int = function
-    | Continuation       -> 0x0
-    | Text               -> 0x1
-    | Binary             -> 0x2
-    | Close              -> 0x8
-    | Ping               -> 0x9
-    | Pong               -> 0xA
-    | Ctrl i | Nonctrl i -> i
-  ;;
-end
-
-module Frame = struct
-  type t =
-    { opcode : Opcode.t
-    ; final : bool
-    ; content : string
-    }
-
-  (* Extensions aren't implemented *)
-  let create ~opcode ?(final=true) content =
-    { opcode; final; content }
-
-
-  (* See rfc6455 - 5.5.1
-     The Close frame MAY contain a body (the "Application data" portion of
-     the frame) that indicates a reason for closing, such as an endpoint
-     shutting down, an endpoint having received a frame too large, or an
-     endpoint having received a frame that does not conform to the format
-     expected by the endpoint.  If there is a body, the first two bytes of
-     the body MUST be a 2-byte unsigned integer (in network byte order)
-     representing a status code with value /code/ defined in Section 7.4.
-     Following the 2-byte integer, the body MAY contain UTF-8-encoded data
-     with value /reason/, the interpretation of which is not defined by
-     this specification.  This data is not necessarily human readable but
-     may be useful for debugging or passing information relevant to the
-     script that opened the connection.  As the data is not guaranteed to
-     be human readable, clients MUST NOT show it to end users. *)
-  let create_close ~code ?final content =
-    let len = String.length content in
-    let content' = Bytes.create (len + 2) in
-    Bytes.From_string.blit ~src:content ~src_pos:0 ~dst:content' ~dst_pos:2 ~len;
-    Binary_packing.pack_unsigned_16_big_endian ~buf:content' ~pos:0 code;
-    create ~opcode:Close ?final (Bytes.to_string content')
-
-  let bit_is_set idx v = (v lsr idx) land 1 = 1
-
-  let set_bit v idx b =
-    if b then v lor (1 lsl idx) else v land (lnot (1 lsl idx))
-
-  let int_value shift len v = (v lsr shift) land ((1 lsl len) - 1)
-
-  let random_bytes ~len =
-    Bytes.init len ~f:(fun _ -> Char.of_int_exn (Random.int 128))
-  ;;
-
-  let xor_with_mask mask msg =
-    for i = 0 to Bytes.length msg - 1 do
-      Bytes.set msg i (Char.of_int_exn (
-        Char.to_int (Bytes.get mask (i mod 4)) lxor Char.to_int (Bytes.get msg i)
-      ))
-    done
-  ;;
-
-  let write_int16 writer n =
-    let buf = Bytes.create 2 in
-    Binary_packing.pack_unsigned_16_big_endian ~buf ~pos:0 n;
-    Writer.write_bytes ~pos:0 ~len:2 writer buf;
-  ;;
-
-  let write_int64 writer n =
-    let buf = Bytes.create 8 in
-    Binary_packing.pack_signed_64_big_endian ~buf ~pos:0 n;
-    Writer.write_bytes ~pos:0 ~len:8 writer buf;
-  ;;
-
-  let write_frame ~masked writer frame =
-    if Writer.is_closed writer
-    then ()
-    else begin
-      let content = Bytes.of_string frame.content in
-      let len = Bytes.length content in
-      let opcode = Opcode.to_int frame.opcode in
-      let payload_length =
-        match len with
-        | n when n < 126      -> len
-        | n when n < 1 lsl 16 -> 126
-        | _                   -> 127
-      in
-      let hdr = 0 in
-      let hdr = set_bit hdr 15 frame.final in
-      let hdr = hdr lor (opcode lsl 8) in
-      let hdr = set_bit hdr 7 masked in
-      let hdr = hdr lor payload_length in
-      let buf = Bytes.create 2 in
-      Binary_packing.pack_unsigned_16_big_endian ~buf ~pos:0 hdr;
-      Writer.write_bytes ~len:2 ~pos:0 writer buf;
-      begin match len with
-      | n when n < 126 -> ()
-      | n when n < (1 lsl 16) -> write_int16 writer n
-      | n         -> write_int64 writer (Int64.of_int n)
-      end;
-      if masked then (
-        let mask = random_bytes ~len:4 in
-        Writer.write_bytes ~pos:0 ~len:4 writer mask;
-        xor_with_mask mask content
-      );
-      Writer.write_bytes ~pos:0 ~len  writer content
-    end
-  ;;
-
-  let close_cleanly ~code ~reason (ws : raw) =
-    Ivar.fill_if_empty ws.closed (code,reason);
-    return `Eof
-  ;;
-
-  let read_int64 (ws : raw) =
-    let buf = Bytes.create 8 in
-    Reader.really_read ws.reader ~len:8 buf >>= function
-    | `Ok -> return (`Ok (Binary_packing.unpack_signed_64_big_endian ~buf ~pos:0))
-    | `Eof _ ->
-      close_cleanly
-        ~code:Connection_close_reason.Protocol_error
-        ~reason:"Did not receive correct length"
-        ws
-  ;;
-
-  let read_int16 (ws : raw) =
-    let buf = Bytes.create 2 in
-    Reader.really_read ws.reader ~len:2 buf >>= function
-    | `Ok -> return (
-      `Ok (Int64.of_int (Binary_packing.unpack_unsigned_16_big_endian ~buf ~pos:0))
-    )
-    | `Eof _ ->
-      close_cleanly
-        ~code:Connection_close_reason.Protocol_error
-        ~reason:"Did not receive correct length"
-        ws
-  ;;
-
-
-
-  let read_frame ({reader; writer=_; closed} as ws) =
-    if Ivar.is_full closed then return `Eof
-    else begin
-      let buf = Bytes.create 2 in
-      Reader.really_read reader ~len:2 buf
-      >>= function
-      | `Eof n ->
-        close_cleanly
-          ~code:Connection_close_reason.Protocol_error
-          ~reason:(sprintf "Expected 2 byte header, got %d" n)
-          ws
-      | `Ok ->
-        let header_part1 = Char.to_int (Bytes.get buf 0) in
-        let header_part2 = Char.to_int (Bytes.get buf 1) in
-        let final  = bit_is_set 7 header_part1 in
-        let opcode = Opcode.of_int (int_value 0 4 header_part1) in
-        let masked = bit_is_set 7 header_part2 in
-        let length = int_value 0 7 header_part2 in
-
-        let payload_length_deferred =
-          match length with
-          | 126            -> read_int16 ws
-          | 127            -> read_int64 ws
-          | i when i < 126 -> return (`Ok (Int64.of_int i))
-          | n              ->
-            close_cleanly
-              ~code:Connection_close_reason.Protocol_error
-              ~reason:(sprintf "Invalid payload length %d" n)
-              ws
-        in
-        payload_length_deferred
-        >>= function
-        | `Eof               -> return `Eof
-        | `Ok payload_length ->
-          let payload_length = Int64.to_int_exn payload_length in
-          let mask = Bytes.create 4 in
-          let read_mask =
-            if masked
-            then begin
-              Reader.really_read reader ~len:4 mask >>= function
-              | `Ok -> return (`Ok ())
-              | `Eof n ->
-                close_cleanly
-                  ~code:Connection_close_reason.Protocol_error
-                  ~reason:(sprintf "Expected 4 byte mask, got %d" n)
-                  ws
-            end
-            else return (`Ok ())
-          in
-          read_mask
-          >>= function
-          | `Eof -> return `Eof
-          | `Ok () ->
-            let content = Bytes.create payload_length in
-            (if payload_length = 0 then return `Ok
-             else Reader.really_read reader ~len:payload_length content)
-            >>= function
-            | `Ok -> (
-                if masked then xor_with_mask mask content;
-                return (`Ok (create ~opcode ~final (Bytes.to_string content)))
-              )
-            | `Eof n ->
-              close_cleanly
-                ~code:Connection_close_reason.Protocol_error
-                ~reason:(sprintf "Read %d bytes, expected %d bytes" n payload_length)
-                ws
-    end
-end
+let close_cleanly ~code ~reason ~info ws =
+  Ivar.fill_if_empty ws.closed (code, reason, info)
+;;
 
 module Pipes = struct
   let recv_pipe ~masked (ws : raw) =
-    let rec read_one r =
-      Frame.read_frame {ws with reader = r}
-      >>= function
-      | `Eof -> return `Eof
-      | `Ok frame ->
-        match frame.opcode with
+    (* [accum_content : list string] is a list of frame contents in the current message in
+       reverse order. We do this because keeping the concatenated contents would be
+       O(length^2) (and noticable in potentially realistic loads). *)
+    let finalise_content accum_content = String.concat (List.rev accum_content) in
+    let rec read_one ~accum_content r =
+      let process_frame ({ Frame.opcode; final; content } as frame) =
+        match opcode with
         | Close ->
-          begin
-            Frame.close_cleanly
-              ~code:Connection_close_reason.Normal_closure
-              ~reason:"Received close message"
-              ws
-            >>= fun eof ->
+          let info =
+            let partial_content =
+              match accum_content with
+              | [] -> None
+              | _ -> Some (finalise_content accum_content)
+            in
+            Some
+              (Info.create_s
+                 [%sexp
+                   { frame : Frame.t; partial_content : (string option[@sexp.omit_nil]) }])
+          in
+          close_cleanly
+            ~code:Connection_close_reason.Normal_closure
+            ~reason:"Received close message"
+            ~info
+            ws;
+          (* flush to make sure the close frame was sent to the client *)
+          let%map () = Writer.flushed ws.writer in
+          `Eof
+        | Ping ->
+          Frame.write_frame ws.writer ~masked { frame with opcode = Pong };
+          read_one ~accum_content r
+        | Pong | Ctrl (_ : int) -> read_one ~accum_content r
+        | Text | Binary | Nonctrl (_ : int) ->
+          if List.is_empty accum_content
+          then
+            if final then return (`Ok content) else read_one ~accum_content:[ content ] r
+          else (
+            let reason = "Bad frame in the middle of a fragmented message" in
+            let info =
+              Some
+                (Info.create_s
+                   [%sexp
+                     "Expecting control or continuation frame"
+                   , { frame : Frame.t
+                     ; interrupted_msg = (finalise_content accum_content : string)
+                     }])
+            in
+            close_cleanly ~code:Connection_close_reason.Protocol_error ~reason ~info ws;
             (* flush to make sure the close frame was sent to the client *)
-            Writer.flushed ws.writer
-            >>| fun () ->
-            eof
-          end
-        | Ping  -> (Frame.write_frame ws.writer ~masked {frame with opcode = Pong}; read_one r)
-        | Pong  -> read_one r
-        | _     -> return (`Ok frame.content)
+            let%map () = Writer.flushed ws.writer in
+            `Eof)
+        | Continuation ->
+          if List.is_empty accum_content
+          then (
+            close_cleanly
+              ~code:Connection_close_reason.Protocol_error
+              ~reason:
+                "Received continuation message without a previous non-control frame to \
+                 continue."
+              ~info:(Some (Info.create_s [%sexp { frame : Frame.t }]))
+              ws;
+            (* flush to make sure the close frame was sent to the client *)
+            let%map () = Writer.flushed ws.writer in
+            `Eof)
+          else (
+            let accum_content = content :: accum_content in
+            if final
+            then return (`Ok (finalise_content accum_content))
+            else read_one ~accum_content r)
+      in
+      if Ivar.is_full ws.closed
+      then return `Eof
+      else (
+        match%bind Frame.read_frame r with
+        | Error { Frame.Error.code; message } ->
+          let info =
+            if List.is_empty accum_content
+            then None
+            else
+              Some
+                (Info.create_s
+                   [%sexp { partial_content : string = finalise_content accum_content }])
+          in
+          close_cleanly ~code ~reason:message ~info ws;
+          return `Eof
+        | Ok frame -> process_frame frame)
     in
-    Reader.read_all ws.reader read_one
+    Reader.read_all ws.reader (read_one ~accum_content:[])
   ;;
 
   let send_pipe ~opcode ~masked (ws : raw) =
@@ -359,13 +133,11 @@ module Pipes = struct
       Writer.transfer ws.writer to_client_r write_message
     in
     upon to_client_closed (fun () ->
-      ignore begin
-        Frame.close_cleanly
-          ~code:Connection_close_reason.Normal_closure
-          ~reason:"Pipe was closed"
-          ws
-      end
-    );
+      close_cleanly
+        ~code:Connection_close_reason.Normal_closure
+        ~reason:"Pipe was closed"
+        ~info:None
+        ws);
     to_client_w
   ;;
 end
@@ -374,46 +146,207 @@ let magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 let sec_websocket_accept_header_value ~sec_websocket_key =
   let module C = Crypto.Cryptokit in
-  C.transform_string (C.Base64.encode_compact ())
+  C.transform_string
+    (C.Base64.encode_compact ())
     (C.hash_string (C.Hash.sha1 ()) (sec_websocket_key ^ magic_string))
-  ^ "=" (* cryptokit leaves out a trailing equals sign *)
+  (* cryptokit leaves out a trailing equals sign *)
+  ^ "="
+;;
 
-
-let close ~code ~reason ~masked (ws: raw) =
+let close ~code ~reason ~masked (ws : raw) =
   Frame.write_frame ws.writer ~masked (Frame.create_close ~code reason);
   (* Wait for the writer to be flushed before actually closing it,
      otherwise the closing frame won't be sent. *)
-  Writer.flushed ws.writer
-  >>= fun () ->
-  Writer.close ws.writer
-  >>= fun () ->
+  let%bind () = Writer.flushed ws.writer in
+  let%bind () = Writer.close ws.writer in
   Reader.close ws.reader
-
 ;;
 
-let close_finished { raw = { closed; writer; reader}; pipes = _ } =
-  Ivar.read closed
-  >>= fun res ->
+let close_finished { raw = { closed; writer; reader }; pipes = _ } =
+  let%bind res = Ivar.read closed in
   (* Always close writers before readers due to the way TCP writers work *)
-  Writer.close_finished writer
-  >>= fun () ->
-  Reader.close_finished reader
-  >>| fun () ->
+  let%bind () = Writer.close_finished writer in
+  let%map () = Reader.close_finished reader in
   res
+;;
 
-let create ?(opcode=`Text) ~(role : Websocket_role.t) reader writer =
-  let opcode = match opcode with
-    | `Text   -> Opcode.Text
+let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
+  let opcode =
+    match opcode with
+    | `Text -> Opcode.Text
     | `Binary -> Opcode.Binary
   in
   let masked = Websocket_role.should_mask role in
   let closed = Ivar.create () in
   let ws = { reader; writer; closed } in
-  don't_wait_for begin
-    Ivar.read closed
-    >>= fun (code,reason) ->
-    close ~code:(Connection_close_reason.to_int code) ~reason ~masked ws
-  end;
+  don't_wait_for
+    (let%bind code, reason, _info = Ivar.read closed in
+     close ~code:(Connection_close_reason.to_int code) ~reason ~masked ws);
   let reader = Pipes.recv_pipe ~masked ws in
   let writer = Pipes.send_pipe ~opcode ~masked ws in
   { pipes = reader, writer; raw = ws }
+;;
+
+let%expect_test "partial frame handling" =
+  let write_frames frames =
+    let fname = "frame.txt" in
+    let%bind writer = Writer.open_file ~append:false fname in
+    let () = List.iter ~f:(Frame.write_frame ~masked:false writer) frames in
+    let%bind () = Writer.close writer in
+    let%bind contents = Reader.file_contents fname in
+    let%bind () = Unix.unlink fname in
+    return contents
+  in
+  let read_partial ~len s =
+    let fname = sprintf "content-%d" len in
+    let%bind () = Writer.save fname ~contents:(String.sub s ~pos:0 ~len) in
+    let%bind reader = Reader.open_file fname
+    and writer = Writer.open_file "/dev/null" in
+    let ws = create ~role:Server reader writer in
+    let r, _w = pipes ws in
+    let%bind q = Pipe.read_all r in
+    let%bind code, reason, info = close_finished ws in
+    print_s
+      [%sexp
+        { input_size = (len : int)
+        ; content_read = (q : string Queue.t)
+        ; close_code = (code : Connection_close_reason.t)
+        ; close_reason = (reason : string)
+        ; other_info = (info : (Info.t option[@sexp.omit_nil]))
+        }];
+    let%bind () = Reader.close reader
+    and () = Writer.close writer in
+    Unix.unlink fname
+  in
+  let print_all_partials frames =
+    let%bind contents = write_frames frames in
+    print_s [%sexp "full_contents", (contents : string)];
+    let rec loop len =
+      if len >= String.length contents
+      then Deferred.unit
+      else (
+        let%bind () = read_partial contents ~len in
+        loop (len + 1))
+    in
+    loop 0
+  in
+  let print_partial ~len frames =
+    let%bind contents = write_frames frames in
+    print_s [%sexp "full_contents", (contents : string)];
+    read_partial contents ~len
+  in
+  let print_frames frames =
+    let%bind contents = write_frames frames in
+    print_s [%sexp "full_contents", (contents : string)];
+    read_partial contents ~len:(String.length contents)
+  in
+  let text_frame ?final txt = Frame.create ?final ~opcode:Text txt in
+  let continuation_frame ?final txt = Frame.create ?final ~opcode:Continuation txt in
+  let close_frame txt = Frame.create_close ~code:2 txt in
+  let%bind () = print_all_partials [ text_frame "hello"; close_frame "reason" ] in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\129\005hello\136\b\000\002reason")
+    ((input_size 0) (content_read ()) (close_code Protocol_error)
+     (close_reason "Expected 2 byte header, got 0"))
+    ((input_size 1) (content_read ()) (close_code Protocol_error)
+     (close_reason "Expected 2 byte header, got 1"))
+    ((input_size 2) (content_read ()) (close_code Protocol_error)
+     (close_reason "Read 0 bytes, expected 5 bytes"))
+    ((input_size 3) (content_read ()) (close_code Protocol_error)
+     (close_reason "Read 1 bytes, expected 5 bytes"))
+    ((input_size 4) (content_read ()) (close_code Protocol_error)
+     (close_reason "Read 2 bytes, expected 5 bytes"))
+    ((input_size 5) (content_read ()) (close_code Protocol_error)
+     (close_reason "Read 3 bytes, expected 5 bytes"))
+    ((input_size 6) (content_read ()) (close_code Protocol_error)
+     (close_reason "Read 4 bytes, expected 5 bytes"))
+    ((input_size 7) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Expected 2 byte header, got 0"))
+    ((input_size 8) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Expected 2 byte header, got 1"))
+    ((input_size 9) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 0 bytes, expected 8 bytes"))
+    ((input_size 10) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 1 bytes, expected 8 bytes"))
+    ((input_size 11) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 2 bytes, expected 8 bytes"))
+    ((input_size 12) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 3 bytes, expected 8 bytes"))
+    ((input_size 13) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 4 bytes, expected 8 bytes"))
+    ((input_size 14) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 5 bytes, expected 8 bytes"))
+    ((input_size 15) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 6 bytes, expected 8 bytes"))
+    ((input_size 16) (content_read (hello)) (close_code Protocol_error)
+     (close_reason "Read 7 bytes, expected 8 bytes")) |}]
+  in
+  let%bind () = print_frames [ text_frame "hello"; close_frame "reason" ] in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\129\005hello\136\b\000\002reason")
+    ((input_size 17) (content_read (hello)) (close_code Normal_closure)
+     (close_reason "Received close message")
+     (other_info
+      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}]
+  in
+  let%bind () = print_frames [ text_frame "hello"; text_frame "hello" ] in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\129\005hello\129\005hello")
+    ((input_size 14) (content_read (hello hello)) (close_code Protocol_error)
+     (close_reason "Expected 2 byte header, got 0")) |}]
+  in
+  let%bind () =
+    print_frames
+      [ text_frame ~final:false "hel"; continuation_frame "lo"; close_frame "reason" ]
+  in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\001\003hel\128\002lo\136\b\000\002reason")
+    ((input_size 19) (content_read (hello)) (close_code Normal_closure)
+     (close_reason "Received close message")
+     (other_info
+      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}]
+  in
+  let%bind () = print_frames [ text_frame ~final:false "hello"; text_frame "bye" ] in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\001\005hello\129\003bye")
+    ((input_size 12) (content_read ()) (close_code Protocol_error)
+     (close_reason "Bad frame in the middle of a fragmented message")
+     (other_info
+      (("Expecting control or continuation frame"
+        ((frame ((opcode Text) (final true) (content bye)))
+         (interrupted_msg hello)))))) |}]
+  in
+  let%bind () =
+    print_partial ~len:8 [ text_frame ~final:false "hello"; text_frame "bye" ]
+  in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\001\005hello\129\003bye")
+    ((input_size 8) (content_read ()) (close_code Protocol_error)
+     (close_reason "Expected 2 byte header, got 1")
+     (other_info (((partial_content hello))))) |}]
+  in
+  let%bind () = print_frames [ continuation_frame "hello" ] in
+  let%bind () =
+    [%expect
+      {|
+    (full_contents "\128\005hello")
+    ((input_size 7) (content_read ()) (close_code Protocol_error)
+     (close_reason
+      "Received continuation message without a previous non-control frame to continue.")
+     (other_info
+      (((frame ((opcode Continuation) (final true) (content hello))))))) |}]
+  in
+  Deferred.unit
+;;
