@@ -244,9 +244,8 @@ let%expect_test "partial frame handling" =
   let continuation_frame ?final txt = Frame.create ?final ~opcode:Continuation txt in
   let close_frame txt = Frame.create_close ~code:2 txt in
   let%bind () = print_all_partials [ text_frame "hello"; close_frame "reason" ] in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\129\005hello\136\b\000\002reason")
     ((input_size 0) (content_read ()) (close_code Protocol_error)
      (close_reason "Expected 2 byte header, got 0"))
@@ -281,72 +280,59 @@ let%expect_test "partial frame handling" =
     ((input_size 15) (content_read (hello)) (close_code Protocol_error)
      (close_reason "Read 6 bytes, expected 8 bytes"))
     ((input_size 16) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 7 bytes, expected 8 bytes")) |}]
-  in
+     (close_reason "Read 7 bytes, expected 8 bytes")) |}];
   let%bind () = print_frames [ text_frame "hello"; close_frame "reason" ] in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\129\005hello\136\b\000\002reason")
     ((input_size 17) (content_read (hello)) (close_code Normal_closure)
      (close_reason "Received close message")
      (other_info
-      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}]
-  in
+      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}];
   let%bind () = print_frames [ text_frame "hello"; text_frame "hello" ] in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\129\005hello\129\005hello")
     ((input_size 14) (content_read (hello hello)) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 0")) |}]
-  in
+     (close_reason "Expected 2 byte header, got 0")) |}];
   let%bind () =
     print_frames
       [ text_frame ~final:false "hel"; continuation_frame "lo"; close_frame "reason" ]
   in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\001\003hel\128\002lo\136\b\000\002reason")
     ((input_size 19) (content_read (hello)) (close_code Normal_closure)
      (close_reason "Received close message")
      (other_info
-      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}]
-  in
+      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}];
   let%bind () = print_frames [ text_frame ~final:false "hello"; text_frame "bye" ] in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\001\005hello\129\003bye")
     ((input_size 12) (content_read ()) (close_code Protocol_error)
      (close_reason "Bad frame in the middle of a fragmented message")
      (other_info
       (("Expecting control or continuation frame"
         ((frame ((opcode Text) (final true) (content bye)))
-         (interrupted_msg hello)))))) |}]
-  in
+         (interrupted_msg hello)))))) |}];
   let%bind () =
     print_partial ~len:8 [ text_frame ~final:false "hello"; text_frame "bye" ]
   in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\001\005hello\129\003bye")
     ((input_size 8) (content_read ()) (close_code Protocol_error)
      (close_reason "Expected 2 byte header, got 1")
-     (other_info (((partial_content hello))))) |}]
-  in
+     (other_info (((partial_content hello))))) |}];
   let%bind () = print_frames [ continuation_frame "hello" ] in
-  let%bind () =
-    [%expect
-      {|
+  [%expect
+    {|
     (full_contents "\128\005hello")
     ((input_size 7) (content_read ()) (close_code Protocol_error)
      (close_reason
       "Received continuation message without a previous non-control frame to continue.")
      (other_info
-      (((frame ((opcode Continuation) (final true) (content hello))))))) |}]
-  in
+      (((frame ((opcode Continuation) (final true) (content hello))))))) |}];
   Deferred.unit
 ;;
