@@ -1,5 +1,6 @@
 open! Core
 open Async
+module Opcode = Opcode
 module Connection_close_reason = Connection_close_reason
 
 type t
@@ -22,3 +23,4 @@ val create
 
 val pipes : t -> string Pipe.Reader.t * string Pipe.Writer.t
 val close_finished : t -> (Connection_close_reason.t * string * Info.t option) Deferred.t
+val frame_received : t -> (Opcode.t -> unit) Bus.Read_only.t

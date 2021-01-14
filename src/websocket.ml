@@ -1,5 +1,6 @@
 open Core
 open Async
+module Opcode = Opcode
 module Connection_close_reason = Connection_close_reason
 
 module Websocket_role = struct
@@ -26,6 +27,7 @@ type raw =
 type t =
   { raw : raw
   ; pipes : string Pipe.Reader.t * string Pipe.Writer.t
+  ; read_opcode_bus : (Opcode.t -> unit) Bus.Read_write.t
   }
 [@@deriving fields]
 
@@ -33,14 +35,17 @@ let close_cleanly ~code ~reason ~info ws =
   Ivar.fill_if_empty ws.closed (code, reason, info)
 ;;
 
+let frame_received t = read_opcode_bus t |> Bus.read_only
+
 module Pipes = struct
-  let recv_pipe ~masked (ws : raw) =
+  let recv_pipe ~read_opcode_bus ~masked (ws : raw) =
     (* [accum_content : list string] is a list of frame contents in the current message in
        reverse order. We do this because keeping the concatenated contents would be
        O(length^2) (and noticable in potentially realistic loads). *)
     let finalise_content accum_content = String.concat (List.rev accum_content) in
     let rec read_one ~accum_content r =
       let process_frame ({ Frame.opcode; final; content } as frame) =
+        if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;
         match opcode with
         | Close ->
           let info =
@@ -162,9 +167,9 @@ let close ~code ~reason ~masked (ws : raw) =
   Reader.close ws.reader
 ;;
 
-let close_finished { raw = { closed; writer; reader }; pipes = _ } =
+let close_finished { raw = { closed; writer; reader }; pipes = _; read_opcode_bus = _ } =
   let%bind res = Ivar.read closed in
-  (* Always close writers before readers due to the way TCP writers work *)
+  (* Always wait for writer closing before readers due to the way TCP writers work *)
   let%bind () = Writer.close_finished writer in
   let%map () = Reader.close_finished reader in
   res
@@ -182,9 +187,19 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
   don't_wait_for
     (let%bind code, reason, _info = Ivar.read closed in
      close ~code:(Connection_close_reason.to_int code) ~reason ~masked ws);
-  let reader = Pipes.recv_pipe ~masked ws in
+  let read_opcode_bus =
+    Bus.create
+      [%here]
+      Bus.Callback_arity.Arity1
+      ~on_subscription_after_first_write:Bus.On_subscription_after_first_write.Allow
+      ~on_callback_raise:(fun (_ : Error.t) -> ())
+  in
+  don't_wait_for
+    (let%map () = Ivar.read closed |> Deferred.ignore_m in
+     Bus.close read_opcode_bus);
+  let reader = Pipes.recv_pipe ~read_opcode_bus ~masked ws in
   let writer = Pipes.send_pipe ~opcode ~masked ws in
-  { pipes = reader, writer; raw = ws }
+  { pipes = reader, writer; raw = ws; read_opcode_bus }
 ;;
 
 let%expect_test "partial frame handling" =
