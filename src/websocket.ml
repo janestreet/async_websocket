@@ -28,6 +28,7 @@ type t =
   { raw : raw
   ; pipes : string Pipe.Reader.t * string Pipe.Writer.t
   ; read_opcode_bus : (Opcode.t -> unit) Bus.Read_write.t
+  ; masked : bool
   }
 [@@deriving fields]
 
@@ -36,6 +37,10 @@ let close_cleanly ~code ~reason ~info ws =
 ;;
 
 let frame_received t = read_opcode_bus t |> Bus.read_only
+
+let send_ping t msg =
+  Frame.write_frame t.raw.writer ~masked:t.masked (Frame.create ~opcode:Ping msg)
+;;
 
 module Pipes = struct
   let recv_pipe ~read_opcode_bus ~masked (ws : raw) =
@@ -167,7 +172,9 @@ let close ~code ~reason ~masked (ws : raw) =
   Reader.close ws.reader
 ;;
 
-let close_finished { raw = { closed; writer; reader }; pipes = _; read_opcode_bus = _ } =
+let close_finished
+      { raw = { closed; writer; reader }; pipes = _; read_opcode_bus = _; masked = _ }
+  =
   let%bind res = Ivar.read closed in
   (* Always wait for writer closing before readers due to the way TCP writers work *)
   let%bind () = Writer.close_finished writer in
@@ -199,7 +206,7 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
      Bus.close read_opcode_bus);
   let reader = Pipes.recv_pipe ~read_opcode_bus ~masked ws in
   let writer = Pipes.send_pipe ~opcode ~masked ws in
-  { pipes = reader, writer; raw = ws; read_opcode_bus }
+  { pipes = reader, writer; raw = ws; read_opcode_bus; masked }
 ;;
 
 let%expect_test "partial frame handling" =
