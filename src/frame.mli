@@ -13,6 +13,7 @@ module Error : sig
     { code : Connection_close_reason.t
     ; message : string
     }
+  [@@deriving sexp_of]
 end
 
 val read_frame : Reader.t -> (t, Error.t) Result.t Deferred.t

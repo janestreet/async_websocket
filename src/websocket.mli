@@ -25,3 +25,7 @@ val pipes : t -> string Pipe.Reader.t * string Pipe.Writer.t
 val close_finished : t -> (Connection_close_reason.t * string * Info.t option) Deferred.t
 val frame_received : t -> (Opcode.t -> unit) Bus.Read_only.t
 val send_ping : t -> string -> unit
+
+module For_testing : sig
+  module Frame = Frame
+end

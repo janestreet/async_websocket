@@ -163,23 +163,37 @@ let sec_websocket_accept_header_value ~sec_websocket_key =
   ^ "="
 ;;
 
-let close ~code ~reason ~masked (ws : raw) =
+let close
+      ~code
+      ~reason
+      ~masked
+      { raw = ws; pipes = pipe_reader, pipe_writer; read_opcode_bus = _; masked = _ }
+  =
   Frame.write_frame ws.writer ~masked (Frame.create_close ~code reason);
   (* Wait for the writer to be flushed before actually closing it,
      otherwise the closing frame won't be sent. *)
   let%bind () = Writer.flushed ws.writer in
   let%bind () = Writer.close ws.writer in
-  Reader.close ws.reader
+  let%bind () = Reader.close ws.reader in
+  Pipe.close_read pipe_reader;
+  Pipe.close pipe_writer;
+  return ()
 ;;
 
 let close_finished
-      { raw = { closed; writer; reader }; pipes = _; read_opcode_bus = _; masked = _ }
+      { raw = { closed; writer; reader }
+      ; pipes = pipe_reader, pipe_writer
+      ; read_opcode_bus = _
+      ; masked = _
+      }
   =
   let%bind res = Ivar.read closed in
   (* Always wait for writer closing before readers due to the way TCP writers work *)
   let%bind () = Writer.close_finished writer in
-  let%map () = Reader.close_finished reader in
-  res
+  let%bind () = Reader.close_finished reader in
+  let%bind () = Pipe.closed pipe_reader in
+  let%bind () = Pipe.closed pipe_writer in
+  return res
 ;;
 
 let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
@@ -191,9 +205,6 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
   let masked = Websocket_role.should_mask role in
   let closed = Ivar.create () in
   let ws = { reader; writer; closed } in
-  don't_wait_for
-    (let%bind code, reason, _info = Ivar.read closed in
-     close ~code:(Connection_close_reason.to_int code) ~reason ~masked ws);
   let read_opcode_bus =
     Bus.create
       [%here]
@@ -206,7 +217,22 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
      Bus.close read_opcode_bus);
   let reader = Pipes.recv_pipe ~read_opcode_bus ~masked ws in
   let writer = Pipes.send_pipe ~opcode ~masked ws in
-  { pipes = reader, writer; raw = ws; read_opcode_bus; masked }
+  let when_reader_closes__close_t =
+    let%map () = Pipe.closed reader in
+    close_cleanly
+      ~code:Connection_close_reason.Normal_closure
+      ~reason:"Pipe was closed"
+      ~info:None
+      ws
+  in
+  let when_closed__close_everything t =
+    let%bind code, reason, _info = Ivar.read closed in
+    close ~code:(Connection_close_reason.to_int code) ~reason ~masked t
+  in
+  don't_wait_for when_reader_closes__close_t;
+  let t = { pipes = reader, writer; raw = ws; read_opcode_bus; masked } in
+  don't_wait_for (when_closed__close_everything t);
+  t
 ;;
 
 let%expect_test "partial frame handling" =
@@ -358,3 +384,7 @@ let%expect_test "partial frame handling" =
       (((frame ((opcode Continuation) (final true) (content hello))))))) |}];
   Deferred.unit
 ;;
+
+module For_testing = struct
+  module Frame = Frame
+end

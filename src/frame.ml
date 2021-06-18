@@ -13,6 +13,7 @@ module Error = struct
     { code : Connection_close_reason.t
     ; message : string
     }
+  [@@deriving sexp_of]
 end
 
 (* Extensions aren't implemented *)
@@ -124,55 +125,73 @@ let read_int16 reader =
 ;;
 
 
-let read_frame reader =
-  let buf = Bytes.create 2 in
-  let open Deferred.Result.Let_syntax in
-  match%bind Deferred.ok (Reader.really_read reader ~len:2 buf) with
-  | `Eof n ->
+let read_this_many_bytes reader out ~len ~len_mismatch_error_text
+  : (unit, Error.t) Result.t Deferred.t
+  =
+  if Reader.is_closed reader
+  then
     error_deferred
-      ~code:Connection_close_reason.Protocol_error
-      ~reason:(sprintf "Expected 2 byte header, got %d" n)
-  | `Ok ->
-    let header_part1 = Char.to_int (Bytes.get buf 0) in
-    let header_part2 = Char.to_int (Bytes.get buf 1) in
-    let final = bit_is_set 7 header_part1 in
-    let opcode = Opcode.of_int (int_value 0 4 header_part1) in
-    let masked = bit_is_set 7 header_part2 in
-    let length = int_value 0 7 header_part2 in
-    let%bind payload_length =
-      match length with
-      | 126 -> read_int16 reader
-      | 127 -> read_int64 reader
-      | i when i < 126 -> return (Int64.of_int i)
-      | n ->
-        error_deferred
-          ~code:Connection_close_reason.Protocol_error
-          ~reason:(sprintf "Invalid payload length %d" n)
-    in
-    let payload_length = Int64.to_int_exn payload_length in
-    let mask = Bytes.create 4 in
-    let%bind () =
-      if masked
-      then (
-        match%bind Deferred.ok (Reader.really_read reader ~len:4 mask) with
-        | `Ok -> return ()
-        | `Eof n ->
-          error_deferred
-            ~code:Connection_close_reason.Protocol_error
-            ~reason:(sprintf "Expected 4 byte mask, got %d" n))
-      else return ()
-    in
-    let content = Bytes.create payload_length in
-    (match%bind
-       if payload_length = 0
-       then return `Ok
-       else Deferred.ok (Reader.really_read reader ~len:payload_length content)
-     with
-     | `Ok ->
-       if masked then xor_with_mask mask content;
-       return (create ~opcode ~final (Bytes.to_string content))
-     | `Eof n ->
-       error_deferred
-         ~code:Connection_close_reason.Protocol_error
-         ~reason:(sprintf "Read %d bytes, expected %d bytes" n payload_length))
+      ~code:Connection_close_reason.Closed_abnormally
+      ~reason:"pipe was closed"
+  else (
+    match%bind Reader.really_read reader ~len out with
+    | `Ok -> Deferred.return (Ok ())
+    | `Eof n ->
+      error_deferred
+        ~code:Connection_close_reason.Protocol_error
+        ~reason:(len_mismatch_error_text n))
+;;
+
+let read_frame reader =
+  let open Deferred.Result.Let_syntax in
+  let buf =
+    Bytes.create 2
+  in
+  let read_this_many_bytes = read_this_many_bytes reader in
+  let%bind () =
+    read_this_many_bytes
+      buf
+      ~len_mismatch_error_text:(sprintf "Expected 2 byte header, got %d")
+      ~len:2
+  in
+  let header_part1 = Char.to_int (Bytes.get buf 0) in
+  let header_part2 = Char.to_int (Bytes.get buf 1) in
+  let final = bit_is_set 7 header_part1 in
+  let opcode = Opcode.of_int (int_value 0 4 header_part1) in
+  let masked = bit_is_set 7 header_part2 in
+  let length = int_value 0 7 header_part2 in
+  let%bind payload_length =
+    match length with
+    | 126 -> read_int16 reader
+    | 127 -> read_int64 reader
+    | i when i < 126 -> return (Int64.of_int i)
+    | n ->
+      error_deferred
+        ~code:Connection_close_reason.Protocol_error
+        ~reason:(sprintf "Invalid payload length %d" n)
+  in
+  let payload_length = Int64.to_int_exn payload_length in
+  let mask = Bytes.create 4 in
+  let%bind () =
+    if masked
+    then
+      read_this_many_bytes
+        mask
+        ~len_mismatch_error_text:(sprintf "Expected 4 byte mask, got %d")
+        ~len:4
+    else return ()
+  in
+  let content = Bytes.create payload_length in
+  let%bind () =
+    if payload_length = 0
+    then return ()
+    else
+      read_this_many_bytes
+        content
+        ~len_mismatch_error_text:(fun n ->
+          sprintf "Read %d bytes, expected %d bytes" n payload_length)
+        ~len:payload_length
+  in
+  if masked then xor_with_mask mask content;
+  return (create ~opcode ~final (Bytes.to_string content))
 ;;
