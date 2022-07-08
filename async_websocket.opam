@@ -14,7 +14,7 @@ depends: [
   "async"
   "core_kernel"
   "ppx_jane"
-  "cryptokit"
+  "cryptokit"   {>= "1.16" & < "1.17"}
   "dune"        {>= "2.0.0"}
 ]
 synopsis: "A library that implements the websocket protocol on top of Async"

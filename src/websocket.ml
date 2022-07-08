@@ -131,7 +131,13 @@ module Pipes = struct
           return `Eof
         | Ok frame -> process_frame frame)
     in
-    Reader.read_all ws.reader (read_one ~accum_content:[])
+    Reader.read_all
+      (* Don't close the reader automatically when it gets EOF, since that closes
+         the underlying fd shared with the writer. The reader eventually gets closed
+         along with the writer when [close] is called. *)
+      ~close_when_finished:false
+      ws.reader
+      (read_one ~accum_content:[])
   ;;
 
   let send_pipe ~opcode ~masked (ws : raw) =
