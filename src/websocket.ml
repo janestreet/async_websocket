@@ -212,7 +212,7 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
   let closed = Ivar.create () in
   let ws = { reader; writer; closed } in
   let read_opcode_bus =
-    Bus.create
+    Bus.create_exn
       [%here]
       Bus.Callback_arity.Arity1
       ~on_subscription_after_first_write:Bus.On_subscription_after_first_write.Allow
