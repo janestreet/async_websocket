@@ -43,6 +43,21 @@ let send_ping t msg =
 ;;
 
 module Pipes = struct
+  let close_info ?frame ?partial_content () =
+    let partial_content =
+      Option.filter partial_content ~f:(fun s -> not (String.is_empty s))
+    in
+    match frame, partial_content with
+    | None, None -> None
+    | _ ->
+      Some
+        (Info.create_s
+           [%sexp
+             { frame : (Frame.t option[@sexp.option])
+             ; partial_content : (string option[@sexp.option])
+             }])
+  ;;
+
   let recv_pipe ~read_opcode_bus ~masked (ws : raw) =
     (* [accum_content : list string] is a list of frame contents in the current message in
        reverse order. We do this because keeping the concatenated contents would be
@@ -53,21 +68,10 @@ module Pipes = struct
         if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;
         match opcode with
         | Close ->
-          let info =
-            let partial_content =
-              match accum_content with
-              | [] -> None
-              | _ -> Some (finalise_content accum_content)
-            in
-            Some
-              (Info.create_s
-                 [%sexp
-                   { frame : Frame.t; partial_content : (string option[@sexp.omit_nil]) }])
-          in
           close_cleanly
             ~code:Connection_close_reason.Normal_closure
             ~reason:"Received close message"
-            ~info
+            ~info:(close_info ~frame ~partial_content:(finalise_content accum_content) ())
             ws;
           (* flush to make sure the close frame was sent to the client *)
           let%map () = Writer.flushed ws.writer in
@@ -81,17 +85,16 @@ module Pipes = struct
           then
             if final then return (`Ok content) else read_one ~accum_content:[ content ] r
           else (
-            let reason = "Bad frame in the middle of a fragmented message" in
-            let info =
-              Some
-                (Info.create_s
-                   [%sexp
-                     "Expecting control or continuation frame"
-                   , { frame : Frame.t
-                     ; interrupted_msg = (finalise_content accum_content : string)
-                     }])
+            let reason =
+              "Bad frame in the middle of a fragmented message: Expecting control or \
+               continuation frame"
             in
-            close_cleanly ~code:Connection_close_reason.Protocol_error ~reason ~info ws;
+            close_cleanly
+              ~code:Connection_close_reason.Protocol_error
+              ~reason
+              ~info:
+                (close_info ~frame ~partial_content:(finalise_content accum_content) ())
+              ws;
             (* flush to make sure the close frame was sent to the client *)
             let%map () = Writer.flushed ws.writer in
             `Eof)
@@ -103,7 +106,7 @@ module Pipes = struct
               ~reason:
                 "Received continuation message without a previous non-control frame to \
                  continue."
-              ~info:(Some (Info.create_s [%sexp { frame : Frame.t }]))
+              ~info:(close_info ~frame ())
               ws;
             (* flush to make sure the close frame was sent to the client *)
             let%map () = Writer.flushed ws.writer in
@@ -119,15 +122,11 @@ module Pipes = struct
       else (
         match%bind Frame.read_frame r with
         | Error { Frame.Error.code; message } ->
-          let info =
-            if List.is_empty accum_content
-            then None
-            else
-              Some
-                (Info.create_s
-                   [%sexp { partial_content : string = finalise_content accum_content }])
-          in
-          close_cleanly ~code ~reason:message ~info ws;
+          close_cleanly
+            ~code
+            ~reason:message
+            ~info:(close_info ~partial_content:(finalise_content accum_content) ())
+            ws;
           return `Eof
         | Ok frame -> process_frame frame)
     in
@@ -266,7 +265,7 @@ let%expect_test "partial frame handling" =
         ; content_read = (q : string Queue.t)
         ; close_code = (code : Connection_close_reason.t)
         ; close_reason = (reason : string)
-        ; other_info = (info : (Info.t option[@sexp.omit_nil]))
+        ; other_info = (info : (Info.t option[@sexp.option]))
         }];
     let%bind () = Reader.close reader
     and () = Writer.close writer in
@@ -342,7 +341,7 @@ let%expect_test "partial frame handling" =
     ((input_size 17) (content_read (hello)) (close_code Normal_closure)
      (close_reason "Received close message")
      (other_info
-      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}];
+      ((frame ((opcode Close) (final true) (content "\000\002reason")))))) |}];
   let%bind () = print_frames [ text_frame "hello"; text_frame "hello" ] in
   [%expect
     {|
@@ -359,17 +358,17 @@ let%expect_test "partial frame handling" =
     ((input_size 19) (content_read (hello)) (close_code Normal_closure)
      (close_reason "Received close message")
      (other_info
-      (((frame ((opcode Close) (final true) (content "\000\002reason"))))))) |}];
+      ((frame ((opcode Close) (final true) (content "\000\002reason")))))) |}];
   let%bind () = print_frames [ text_frame ~final:false "hello"; text_frame "bye" ] in
   [%expect
     {|
     (full_contents "\001\005hello\129\003bye")
     ((input_size 12) (content_read ()) (close_code Protocol_error)
-     (close_reason "Bad frame in the middle of a fragmented message")
+     (close_reason
+      "Bad frame in the middle of a fragmented message: Expecting control or continuation frame")
      (other_info
-      (("Expecting control or continuation frame"
-        ((frame ((opcode Text) (final true) (content bye)))
-         (interrupted_msg hello)))))) |}];
+      ((frame ((opcode Text) (final true) (content bye)))
+       (partial_content hello)))) |}];
   let%bind () =
     print_partial ~len:8 [ text_frame ~final:false "hello"; text_frame "bye" ]
   in
@@ -378,7 +377,7 @@ let%expect_test "partial frame handling" =
     (full_contents "\001\005hello\129\003bye")
     ((input_size 8) (content_read ()) (close_code Protocol_error)
      (close_reason "Expected 2 byte header, got 1")
-     (other_info (((partial_content hello))))) |}];
+     (other_info ((partial_content hello)))) |}];
   let%bind () = print_frames [ continuation_frame "hello" ] in
   [%expect
     {|
@@ -386,8 +385,7 @@ let%expect_test "partial frame handling" =
     ((input_size 7) (content_read ()) (close_code Protocol_error)
      (close_reason
       "Received continuation message without a previous non-control frame to continue.")
-     (other_info
-      (((frame ((opcode Continuation) (final true) (content hello))))))) |}];
+     (other_info ((frame ((opcode Continuation) (final true) (content hello)))))) |}];
   Deferred.unit
 ;;
 
