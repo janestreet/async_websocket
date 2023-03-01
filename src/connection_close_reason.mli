@@ -87,7 +87,8 @@ type t =
      connection was closed due to a failure to perform a TLS handshake
      (e.g., the server certificate can't be verified).
   *)
-[@@deriving sexp_of]
+  | Unknown of int
+[@@deriving sexp_of, equal, quickcheck]
 
 val to_int : t -> int
-val of_int : int -> t Or_error.t
+val of_int : int -> t

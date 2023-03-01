@@ -7,9 +7,14 @@ type t =
   | Close
   | Ping
   | Pong
-  | Ctrl of int
-  | Nonctrl of int
-[@@deriving sexp_of]
+  (*
+     RFC 6455:
+     Opcodes 0x3-0x7 are reserved for further non-control frames yet to be defined.
+     Opcodes 0xB-0xF are reserved for further control frames yet to be defined.
+  *)
+  | Ctrl of (int[@quickcheck.generator Int.gen_incl 0xB 0xF])
+  | Nonctrl of (int[@quickcheck.generator Int.gen_incl 0x3 0x7])
+[@@deriving sexp_of, equal, quickcheck]
 
 let of_int i =
   match i land 0xf with
@@ -31,4 +36,13 @@ let to_int = function
   | Ping -> 0x9
   | Pong -> 0xA
   | Ctrl i | Nonctrl i -> i
+;;
+
+type kind =
+  | Control
+  | Non_control
+
+let to_kind = function
+  | Close | Ping | Pong | Ctrl _ -> Control
+  | Continuation | Text | Binary | Nonctrl _ -> Non_control
 ;;

@@ -2,6 +2,10 @@ open Core
 open Async
 module Opcode = Opcode
 module Connection_close_reason = Connection_close_reason
+module Frame_reader = Frame.Frame_reader
+module Frame = Frame
+module Iobuf_writer = Frame.Iobuf_writer
+module Content_reassembler = Content_reassembler
 
 module Websocket_role = struct
   type t =
@@ -36,6 +40,14 @@ let close_cleanly ~code ~reason ~info ws =
   Ivar.fill_if_empty ws.closed (code, reason, info)
 ;;
 
+let transport t =
+  let reader, writer = t.pipes in
+  Async_rpc_kernel.Pipe_transport.create
+    Async_rpc_kernel.Pipe_transport.Kind.string
+    reader
+    writer
+;;
+
 let frame_received t = read_opcode_bus t |> Bus.read_only
 
 let send_ping t msg =
@@ -43,100 +55,115 @@ let send_ping t msg =
 ;;
 
 module Pipes = struct
-  let close_info ?frame ?partial_content () =
+  let close_info ?frame ?partial_content ?unconsumed_data () =
     let partial_content =
       Option.filter partial_content ~f:(fun s -> not (String.is_empty s))
     in
-    match frame, partial_content with
-    | None, None -> None
+    match frame, partial_content, unconsumed_data with
+    | None, None, None -> None
     | _ ->
       Some
         (Info.create_s
            [%sexp
              { frame : (Frame.t option[@sexp.option])
              ; partial_content : (string option[@sexp.option])
+             ; unconsumed_data : (string option[@sexp.option])
              }])
   ;;
 
   let recv_pipe ~read_opcode_bus ~masked (ws : raw) =
-    (* [accum_content : list string] is a list of frame contents in the current message in
-       reverse order. We do this because keeping the concatenated contents would be
-       O(length^2) (and noticable in potentially realistic loads). *)
-    let finalise_content accum_content = String.concat (List.rev accum_content) in
-    let rec read_one ~accum_content r =
-      let process_frame ({ Frame.opcode; final; content } as frame) =
-        if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;
-        match opcode with
-        | Close ->
-          close_cleanly
-            ~code:Connection_close_reason.Normal_closure
-            ~reason:"Received close message"
-            ~info:(close_info ~frame ~partial_content:(finalise_content accum_content) ())
-            ws;
-          (* flush to make sure the close frame was sent to the client *)
-          let%map () = Writer.flushed ws.writer in
-          `Eof
-        | Ping ->
-          Frame.write_frame ws.writer ~masked { frame with opcode = Pong };
-          read_one ~accum_content r
-        | Pong | Ctrl (_ : int) -> read_one ~accum_content r
-        | Text | Binary | Nonctrl (_ : int) ->
-          if List.is_empty accum_content
-          then
-            if final then return (`Ok content) else read_one ~accum_content:[ content ] r
-          else (
-            let reason =
-              "Bad frame in the middle of a fragmented message: Expecting control or \
-               continuation frame"
-            in
-            close_cleanly
-              ~code:Connection_close_reason.Protocol_error
-              ~reason
-              ~info:
-                (close_info ~frame ~partial_content:(finalise_content accum_content) ())
-              ws;
-            (* flush to make sure the close frame was sent to the client *)
-            let%map () = Writer.flushed ws.writer in
-            `Eof)
-        | Continuation ->
-          if List.is_empty accum_content
-          then (
-            close_cleanly
-              ~code:Connection_close_reason.Protocol_error
-              ~reason:
-                "Received continuation message without a previous non-control frame to \
-                 continue."
-              ~info:(close_info ~frame ())
-              ws;
-            (* flush to make sure the close frame was sent to the client *)
-            let%map () = Writer.flushed ws.writer in
-            `Eof)
-          else (
-            let accum_content = content :: accum_content in
-            if final
-            then return (`Ok (finalise_content accum_content))
-            else read_one ~accum_content r)
+    Pipe.create_reader ~close_on_exception:true (fun writer ->
+      let content_handler content =
+        Pipe.write_without_pushback_if_open writer (Iobuf.to_string content)
       in
-      if Ivar.is_full ws.closed
-      then return `Eof
-      else (
-        match%bind Frame.read_frame r with
-        | Error { Frame.Error.code; message } ->
-          close_cleanly
-            ~code
-            ~reason:message
-            ~info:(close_info ~partial_content:(finalise_content accum_content) ())
-            ws;
-          return `Eof
-        | Ok frame -> process_frame frame)
-    in
-    Reader.read_all
-      (* Don't close the reader automatically when it gets EOF, since that closes
-         the underlying fd shared with the writer. The reader eventually gets closed
-         along with the writer when [close] is called. *)
-      ~close_when_finished:false
-      ws.reader
-      (read_one ~accum_content:[])
+      let ping_handler ~content =
+        Frame.write_frame
+          ws.writer
+          ~masked
+          { Frame.opcode = Pong; final = true; content = Iobuf.to_string content }
+      in
+      let protocol_error_handler ~reason ~partial_content ~frame =
+        close_cleanly
+          ~code:Protocol_error
+          ~reason
+          ~info:(close_info ?frame ?partial_content ())
+          ws
+      in
+      let close_handler ~code ~reason ~partial_content =
+        close_cleanly ~code ~reason ~info:(close_info ?partial_content ()) ws
+      in
+      let content_reassembler =
+        Content_reassembler.create
+          ~content_handler
+          ~ping_handler
+          ~close_handler
+          ~protocol_error_handler
+          ()
+      in
+      let%bind reader_result =
+        let frame_reader =
+          let frame_handler
+                ~(opcode : Opcode.t)
+                ~(final : bool)
+                ~(content : (read, Iobuf.no_seek) Iobuf.t)
+                ~masked:
+                _
+            =
+            if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;
+            Content_reassembler.process_frame
+              content_reassembler
+              ~opcode
+              ~final
+              ~content
+          in
+          Frame_reader.create ~frame_handler
+        in
+        Reader.read_one_iobuf_at_a_time ws.reader ~handle_chunk:(fun iobuf ->
+          (match Frame_reader.consume_all_available_frames frame_reader iobuf with
+           | `Consumed_as_much_as_possible | `Consumed_until_incomplete_frame ->
+             `Continue
+           | `Cannot_parse_uint64_length -> `Stop `Cannot_parse_uint64_length)
+          |> return)
+      in
+      (match reader_result with
+       | `Eof ->
+         if Ivar.is_empty ws.closed
+         then
+           close_cleanly
+             ~code:Protocol_error
+             ~reason:"Pipe close unexpectedly without a 'Close' websocket frame"
+             ~info:
+               (close_info
+                  ?partial_content:
+                    (Content_reassembler.partial_content_string content_reassembler)
+                  ())
+             ws
+       | `Eof_with_unconsumed_data unconsumed_data ->
+         if Ivar.is_empty ws.closed
+         then
+           close_cleanly
+             ~code:Protocol_error
+             ~reason:"Pipe close with an incomplete websocket frame"
+             ~info:
+               (close_info
+                  ?partial_content:
+                    (Content_reassembler.partial_content_string content_reassembler)
+                  ~unconsumed_data
+                  ())
+             ws
+       | `Stopped `Cannot_parse_uint64_length ->
+         if Ivar.is_empty ws.closed
+         then
+           close_cleanly
+             ~code:Cannot_accept_data
+             ~reason:"Frame with uint64 length that could not be parsed"
+             ~info:
+               (close_info
+                  ?partial_content:
+                    (Content_reassembler.partial_content_string content_reassembler)
+                  ())
+             ws);
+      return ())
   ;;
 
   let send_pipe ~opcode ~masked (ws : raw) =
@@ -240,6 +267,33 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
   t
 ;;
 
+let monitor_pongs
+      ?(time_source = Time_source.wall_clock ())
+      ~ping_every
+      ~concerning_pong_response_delay
+      ~on_concerning_pong_response_delay
+      t
+  =
+  let pong_received = Bvar.create () in
+  let (_ : (Opcode.t -> unit) Bus.Subscriber.t) =
+    Bus.subscribe_exn t.read_opcode_bus [%here] ~f:(function
+      | Pong -> Bvar.broadcast pong_received ()
+      | Continuation | Text | Binary | Close | Ping | Ctrl _ | Nonctrl _ -> ())
+  in
+  don't_wait_for
+    (Deferred.repeat_until_finished () (fun () ->
+       Deferred.choose
+         [ Deferred.choice (Bvar.wait pong_received) (fun () -> `Repeat ())
+         ; Deferred.choice
+             (Time_source.after time_source concerning_pong_response_delay)
+             (fun () ->
+                on_concerning_pong_response_delay ();
+                `Repeat ())
+         ; Deferred.choice (Ivar.read t.raw.closed) (fun (_, _, _) -> `Finished ())
+         ]));
+  Time_source.every time_source ping_every (fun () -> send_ping t "")
+;;
+
 let%expect_test "partial frame handling" =
   let write_frames frames =
     let fname = "frame.txt" in
@@ -301,53 +355,66 @@ let%expect_test "partial frame handling" =
     {|
     (full_contents "\129\005hello\136\b\000\002reason")
     ((input_size 0) (content_read ()) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 0"))
+     (close_reason "Pipe close unexpectedly without a 'Close' websocket frame"))
     ((input_size 1) (content_read ()) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 1"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\129"))))
     ((input_size 2) (content_read ()) (close_code Protocol_error)
-     (close_reason "Read 0 bytes, expected 5 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\129\005"))))
     ((input_size 3) (content_read ()) (close_code Protocol_error)
-     (close_reason "Read 1 bytes, expected 5 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\129\005h"))))
     ((input_size 4) (content_read ()) (close_code Protocol_error)
-     (close_reason "Read 2 bytes, expected 5 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\129\005he"))))
     ((input_size 5) (content_read ()) (close_code Protocol_error)
-     (close_reason "Read 3 bytes, expected 5 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\129\005hel"))))
     ((input_size 6) (content_read ()) (close_code Protocol_error)
-     (close_reason "Read 4 bytes, expected 5 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\129\005hell"))))
     ((input_size 7) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 0"))
+     (close_reason "Pipe close unexpectedly without a 'Close' websocket frame"))
     ((input_size 8) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 1"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136"))))
     ((input_size 9) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 0 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b"))))
     ((input_size 10) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 1 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000"))))
     ((input_size 11) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 2 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000\002"))))
     ((input_size 12) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 3 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000\002r"))))
     ((input_size 13) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 4 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000\002re"))))
     ((input_size 14) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 5 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000\002rea"))))
     ((input_size 15) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 6 bytes, expected 8 bytes"))
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000\002reas"))))
     ((input_size 16) (content_read (hello)) (close_code Protocol_error)
-     (close_reason "Read 7 bytes, expected 8 bytes")) |}];
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((unconsumed_data "\136\b\000\002reaso")))) |}];
   let%bind () = print_frames [ text_frame "hello"; close_frame "reason" ] in
   [%expect
     {|
     (full_contents "\129\005hello\136\b\000\002reason")
-    ((input_size 17) (content_read (hello)) (close_code Normal_closure)
-     (close_reason "Received close message")
-     (other_info
-      ((frame ((opcode Close) (final true) (content "\000\002reason")))))) |}];
+    ((input_size 17) (content_read (hello)) (close_code (Unknown 2))
+     (close_reason reason)) |}];
   let%bind () = print_frames [ text_frame "hello"; text_frame "hello" ] in
   [%expect
     {|
     (full_contents "\129\005hello\129\005hello")
     ((input_size 14) (content_read (hello hello)) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 0")) |}];
+     (close_reason "Pipe close unexpectedly without a 'Close' websocket frame")) |}];
   let%bind () =
     print_frames
       [ text_frame ~final:false "hel"; continuation_frame "lo"; close_frame "reason" ]
@@ -355,10 +422,8 @@ let%expect_test "partial frame handling" =
   [%expect
     {|
     (full_contents "\001\003hel\128\002lo\136\b\000\002reason")
-    ((input_size 19) (content_read (hello)) (close_code Normal_closure)
-     (close_reason "Received close message")
-     (other_info
-      ((frame ((opcode Close) (final true) (content "\000\002reason")))))) |}];
+    ((input_size 19) (content_read (hello)) (close_code (Unknown 2))
+     (close_reason reason)) |}];
   let%bind () = print_frames [ text_frame ~final:false "hello"; text_frame "bye" ] in
   [%expect
     {|
@@ -376,8 +441,8 @@ let%expect_test "partial frame handling" =
     {|
     (full_contents "\001\005hello\129\003bye")
     ((input_size 8) (content_read ()) (close_code Protocol_error)
-     (close_reason "Expected 2 byte header, got 1")
-     (other_info ((partial_content hello)))) |}];
+     (close_reason "Pipe close with an incomplete websocket frame")
+     (other_info ((partial_content hello) (unconsumed_data "\129")))) |}];
   let%bind () = print_frames [ continuation_frame "hello" ] in
   [%expect
     {|
@@ -388,7 +453,3 @@ let%expect_test "partial frame handling" =
      (other_info ((frame ((opcode Continuation) (final true) (content hello)))))) |}];
   Deferred.unit
 ;;
-
-module For_testing = struct
-  module Frame = Frame
-end
