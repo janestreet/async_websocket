@@ -110,18 +110,13 @@ module Pipes = struct
                 _
             =
             if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;
-            Content_reassembler.process_frame
-              content_reassembler
-              ~opcode
-              ~final
-              ~content
+            Content_reassembler.process_frame content_reassembler ~opcode ~final ~content
           in
           Frame_reader.create ~frame_handler
         in
         Reader.read_one_iobuf_at_a_time ws.reader ~handle_chunk:(fun iobuf ->
           (match Frame_reader.consume_all_available_frames frame_reader iobuf with
-           | `Consumed_as_much_as_possible | `Consumed_until_incomplete_frame ->
-             `Continue
+           | `Consumed_as_much_as_possible | `Consumed_until_incomplete_frame -> `Continue
            | `Cannot_parse_uint64_length -> `Stop `Cannot_parse_uint64_length)
           |> return)
       in
