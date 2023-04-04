@@ -105,6 +105,13 @@ val prepare_ping
 
 val finish_ping : _ t -> unit
 
+(** Report whenever any websocket frame is received by the [t].
+
+    This may be useful for client-level timeout mechanisms that want to take action when
+    no messages whatsoever have been received, including e.g. ping frames.
+*)
+val frame_received : _ t -> (Websocket.Opcode.t -> unit) Bus.Read_only.t
+
 (** Send a close frame and initiates the closing handshake. *)
 val send_close
   :  _ t

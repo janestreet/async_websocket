@@ -378,10 +378,13 @@ type 'read_mode t =
   ; outgoing_message_format : [ `Text | `Binary ]
   ; frame_reader : Frame.Frame_reader.Expert.t
   ; frame_writer : Frame.Iobuf_writer.t
+  ; frame_received_rw : (Websocket.Opcode.t -> unit) Bus.Read_write.t
   ; mutable inside_on_readable : bool
   ; mutable on_readable_scheduled : bool
   }
 [@@deriving fields]
+
+let frame_received t = Bus.read_only t.frame_received_rw
 
 module Writer = struct
   type write_frame_result =
@@ -699,6 +702,7 @@ module Partial_frame_handler = struct
         ~total_frame_payload_len
         ~payload_pos
     =
+    Bus.write t.frame_received_rw opcode;
     match opcode with
     | Ping ->
       (* It's okay to discard any pending pong, per RFC:
@@ -827,6 +831,13 @@ let create
       ()
   in
   let frame_writer = Frame.Iobuf_writer.create ~role in
+  let frame_received_rw =
+    Bus.create_exn
+      [%here]
+      Bus.Callback_arity.Arity1
+      ~on_subscription_after_first_write:Bus.On_subscription_after_first_write.Allow
+      ~on_callback_raise:(fun error -> raise_s [%sexp (error : Error.t)])
+  in
   let send_close t_lazy ~code ~reason () =
     ignore
       (send_close (Lazy.force t_lazy) ~code ~reason
@@ -853,6 +864,7 @@ let create
           Frame.Frame_reader.Expert.create
             ~partial_frame_handler:(Partial_frame_handler.partial_frame_handler t)
       ; frame_writer
+      ; frame_received_rw
       ; inside_on_readable = false
       ; on_readable_scheduled = false
       }
