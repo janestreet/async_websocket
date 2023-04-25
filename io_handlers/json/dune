@@ -1,3 +1,0 @@
-(library (name websocket_io_handlers_json)
- (libraries websocket_io_handlers angstrom jsonaf)
- (preprocess (pps ppx_jane)))
