@@ -34,7 +34,7 @@ type t =
   ; read_opcode_bus : (Opcode.t -> unit) Bus.Read_write.t
   ; masked : bool
   }
-[@@deriving fields]
+[@@deriving fields ~getters]
 
 let close_cleanly ~code ~reason ~info ws =
   Ivar.fill_if_empty ws.closed (code, reason, info)
