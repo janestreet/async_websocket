@@ -13,12 +13,12 @@ type t
 
 val create
   :  content_handler:((read, Iobuf.no_seek) Iobuf.t -> unit)
-  (** [content_handler] is called when text, binary, or non-control content is
+       (** [content_handler] is called when text, binary, or non-control content is
       completed. If the content was fragmented, [content_handler] is only
       called on the final frame, when the full, unfragmented contents has been
       collected. *)
   -> ping_handler:(content:(read, Iobuf.no_seek) Iobuf.t -> unit)
-  (** [ping_handler] is called whenever a ping message is received. Since ping
+       (** [ping_handler] is called whenever a ping message is received. Since ping
       messages cannot be fragmented, [content] corresponds to the content of
       a single ping frame. *)
   -> close_handler:
@@ -26,13 +26,13 @@ val create
         -> reason:string
         -> partial_content:string option
         -> unit)
-  (** [close_handler] is called whenever a close message is received. Since
+       (** [close_handler] is called whenever a close message is received. Since
       close messages cannot be fragmented, [content] corresponds to the content
       of a single close frame. [partial_content], if it exists, is the
       partially built content of the fragmented message being collected. *)
   -> protocol_error_handler:
        (reason:string -> partial_content:string option -> frame:Frame.t option -> unit)
-  (** [protocol_error_handler] is called whenever the websocket protocol is
+       (** [protocol_error_handler] is called whenever the websocket protocol is
       violated somehow. [partial_content], if it exists, is the partially built
       content of the fragmented message being collected. [frame] is the frame
       that violated the protocol. *)

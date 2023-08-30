@@ -38,13 +38,12 @@ let finalise_content t =
 ;;
 
 let create
-      ~content_handler
-      ~ping_handler
-      ~close_handler
-      ~protocol_error_handler
-      ?(
-      initial_buffer_size = 8192)
-      ()
+  ~content_handler
+  ~ping_handler
+  ~close_handler
+  ~protocol_error_handler
+  ?(initial_buffer_size = 8192)
+  ()
   =
   let partial_content = Iobuf.create ~len:initial_buffer_size in
   { content_handler
@@ -71,10 +70,10 @@ let append_content t (content : (read, Iobuf.no_seek) Iobuf.t) =
 ;;
 
 let process_frame
-      t
-      ~(opcode : Opcode.t)
-      ~(final : bool)
-      ~(content : (read, Iobuf.no_seek) Iobuf.t)
+  t
+  ~(opcode : Opcode.t)
+  ~(final : bool)
+  ~(content : (read, Iobuf.no_seek) Iobuf.t)
   =
   match opcode with
   | Close ->

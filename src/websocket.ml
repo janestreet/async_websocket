@@ -103,11 +103,10 @@ module Pipes = struct
       let%bind reader_result =
         let frame_reader =
           let frame_handler
-                ~(opcode : Opcode.t)
-                ~(final : bool)
-                ~(content : (read, Iobuf.no_seek) Iobuf.t)
-                ~masked:
-                _
+            ~(opcode : Opcode.t)
+            ~(final : bool)
+            ~(content : (read, Iobuf.no_seek) Iobuf.t)
+            ~masked:_
             =
             if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;
             Content_reassembler.process_frame content_reassembler ~opcode ~final ~content
@@ -166,9 +165,7 @@ module Pipes = struct
       Frame.write_frame ws.writer ~masked (Frame.create ~opcode msg)
     in
     let to_client_r, to_client_w = Pipe.create () in
-    let to_client_closed =
-      Writer.transfer ws.writer to_client_r write_message
-    in
+    let to_client_closed = Writer.transfer ws.writer to_client_r write_message in
     upon to_client_closed (fun () ->
       close_cleanly
         ~code:Connection_close_reason.Normal_closure
@@ -191,10 +188,10 @@ let sec_websocket_accept_header_value ~sec_websocket_key =
 ;;
 
 let close
-      ~code
-      ~reason
-      ~masked
-      { raw = ws; pipes = pipe_reader, pipe_writer; read_opcode_bus = _; masked = _ }
+  ~code
+  ~reason
+  ~masked
+  { raw = ws; pipes = pipe_reader, pipe_writer; read_opcode_bus = _; masked = _ }
   =
   Frame.write_frame ws.writer ~masked (Frame.create_close ~code reason);
   (* Wait for the writer to be flushed before actually closing it,
@@ -208,11 +205,11 @@ let close
 ;;
 
 let close_finished
-      { raw = { closed; writer; reader }
-      ; pipes = pipe_reader, pipe_writer
-      ; read_opcode_bus = _
-      ; masked = _
-      }
+  { raw = { closed; writer; reader }
+  ; pipes = pipe_reader, pipe_writer
+  ; read_opcode_bus = _
+  ; masked = _
+  }
   =
   let%bind res = Ivar.read closed in
   (* Always wait for writer closing before readers due to the way TCP writers work *)
@@ -263,11 +260,11 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
 ;;
 
 let monitor_pongs
-      ?(time_source = Time_source.wall_clock ())
-      ~ping_every
-      ~concerning_pong_response_delay
-      ~on_concerning_pong_response_delay
-      t
+  ?(time_source = Time_source.wall_clock ())
+  ~ping_every
+  ~concerning_pong_response_delay
+  ~on_concerning_pong_response_delay
+  t
   =
   let pong_received = Bvar.create () in
   let (_ : (Opcode.t -> unit) Bus.Subscriber.t) =
@@ -282,8 +279,8 @@ let monitor_pongs
          ; Deferred.choice
              (Time_source.after time_source concerning_pong_response_delay)
              (fun () ->
-                on_concerning_pong_response_delay ();
-                `Repeat ())
+             on_concerning_pong_response_delay ();
+             `Repeat ())
          ; Deferred.choice (Ivar.read t.raw.closed) (fun (_, _, _) -> `Finished ())
          ]));
   Time_source.every time_source ping_every (fun () -> send_ping t "")

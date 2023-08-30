@@ -74,7 +74,7 @@ module Frame_reader : sig
           -> final:bool
           -> content:(read, Iobuf.no_seek) Iobuf.t
           -> masked:[ `Content_was_masked | `Content_was_not_masked ]
-          (** [masked] indicates if the received content was masked, which is useful for a
+               (** [masked] indicates if the received content was masked, which is useful for a
               websocket server to enforce that clients are masking the content.
 
               Unmasking will be applied whenever possible. The handler will always receive
@@ -107,13 +107,13 @@ module Frame_reader : sig
       opcode:Opcode.t
       -> final:bool
       -> total_frame_payload_len:int
-      (** [total_frame_payload_len] indicates the totality of the payload in the frame.
+           (** [total_frame_payload_len] indicates the totality of the payload in the frame.
           Only a fraction of which may be available for consumption in [payload]. *)
       -> payload_pos:int
-      (** Indicates the offset into the totality of the payload where [payload] starts *)
+           (** Indicates the offset into the totality of the payload where [payload] starts *)
       -> payload_fragment:(read, Iobuf.seek) Iobuf.t
       -> masked:[ `Payload_was_masked | `Payload_was_not_masked ]
-      (** [masked] indicates if the received payload was masked, which is useful for a
+           (** [masked] indicates if the received payload was masked, which is useful for a
           websocket server to enforce that clients are masking the payload.
 
           Unmasking will be applied whenever possible. The handler will always receive
