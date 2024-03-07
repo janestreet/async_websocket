@@ -546,6 +546,7 @@ module Frame_reader = struct
       ; mutable masked : [ `No_mask_needed | `Mask ]
       ; mutable opcode : Opcode.t
       ; mutable final : bool
+      ; output_iobuf : (read_write, Iobuf.seek) Iobuf.t
       }
 
     let create ~partial_frame_handler =
@@ -557,6 +558,7 @@ module Frame_reader = struct
       ; masked = `No_mask_needed
       ; opcode = Opcode.of_int 0
       ; final = false
+      ; output_iobuf = Iobuf.create ~len:0
       }
     ;;
 
@@ -571,26 +573,17 @@ module Frame_reader = struct
       if possible_consume_length > 0
          || (possible_consume_length = 0 && remaining_payload_length = 0)
       then (
-        let lo = Iobuf.Lo_bound.window iobuf in
-        let hi = Iobuf.Hi_bound.window iobuf in
-        Iobuf.resize iobuf ~len:possible_consume_length;
-        let len_before = Iobuf.length iobuf in
-        (* Inlined [Exn.protectx] here to avoid allocations *)
-        match f iobuf with
+        Iobuf.set_bounds_and_buffer ~src:iobuf ~dst:t.output_iobuf;
+        Iobuf.resize t.output_iobuf ~len:possible_consume_length;
+        match f t.output_iobuf with
         | () ->
-          let len_after = Iobuf.length iobuf in
-          let consumed = len_before - len_after in
-          Iobuf.Lo_bound.restore lo iobuf;
-          Iobuf.Hi_bound.restore hi iobuf;
+          let consumed = possible_consume_length - Iobuf.length t.output_iobuf in
           Iobuf.unsafe_advance iobuf consumed;
           t.remaining_payload_to_consume <- t.remaining_payload_to_consume - consumed
         | exception exn ->
           let bt = Stdlib.Printexc.get_raw_backtrace () in
           (match
-             let len_after = Iobuf.length iobuf in
-             let consumed = len_before - len_after in
-             Iobuf.Lo_bound.restore lo iobuf;
-             Iobuf.Hi_bound.restore hi iobuf;
+             let consumed = possible_consume_length - Iobuf.length t.output_iobuf in
              Iobuf.unsafe_advance iobuf consumed;
              t.remaining_payload_to_consume <- t.remaining_payload_to_consume - consumed
            with
