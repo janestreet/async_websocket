@@ -10,7 +10,7 @@ build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]
 depends: [
-  "ocaml" {>= "4.14.0"}
+  "ocaml" {>= "5.1.0"}
   "async"
   "core_kernel"
   "ppx_jane"
@@ -20,6 +20,6 @@ depends: [
 available: arch != "arm32" & arch != "x86_32"
 synopsis: "A library that implements the websocket protocol on top of Async"
 description: "
-This library implements both the server and client side of 
+This library implements both the server and client side of
                 the websocket protocol.
 "
