@@ -279,8 +279,8 @@ let monitor_pongs
          ; Deferred.choice
              (Time_source.after time_source concerning_pong_response_delay)
              (fun () ->
-             on_concerning_pong_response_delay ();
-             `Repeat ())
+                on_concerning_pong_response_delay ();
+                `Repeat ())
          ; Deferred.choice (Ivar.read t.raw.closed) (fun (_, _, _) -> `Finished ())
          ]));
   Time_source.every time_source ping_every (fun () -> send_ping t "")

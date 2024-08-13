@@ -490,28 +490,28 @@ module Frame_reader = struct
         ~payload_availability:`Entire_payload_must_be_available
         ~mask:t.mask
         ~f:(fun ~masked ~final ~opcode ~payload_length ->
-        let process_frame_content iobuf =
-          (* Unmask the frame inline. This should be okay now that we know for sure
+          let process_frame_content iobuf =
+            (* Unmask the frame inline. This should be okay now that we know for sure
                we can process the frame. *)
-          let masked =
-            match masked with
-            | `No_mask_needed -> `Content_was_not_masked
-            | `Mask ->
-              xor_iobuf_with_mask iobuf t.mask ~offset:0;
-              `Content_was_masked
+            let masked =
+              match masked with
+              | `No_mask_needed -> `Content_was_not_masked
+              | `Mask ->
+                xor_iobuf_with_mask iobuf t.mask ~offset:0;
+                `Content_was_masked
+            in
+            Iobuf.protect_window_bounds_and_buffer_3
+              (Iobuf.read_only iobuf)
+              ~f:t.frame_handler
+              opcode
+              final
+              masked
           in
-          Iobuf.protect_window_bounds_and_buffer_3
-            (Iobuf.read_only iobuf)
-            ~f:t.frame_handler
-            opcode
-            final
-            masked
-        in
-        let iobuf_length = Iobuf.length iobuf in
-        Iobuf.unsafe_resize iobuf ~len:payload_length;
-        process_frame_content (Iobuf.no_seek iobuf);
-        Iobuf.unsafe_resize iobuf ~len:iobuf_length;
-        Iobuf.unsafe_advance iobuf payload_length)
+          let iobuf_length = Iobuf.length iobuf in
+          Iobuf.unsafe_resize iobuf ~len:payload_length;
+          process_frame_content (Iobuf.no_seek iobuf);
+          Iobuf.unsafe_resize iobuf ~len:iobuf_length;
+          Iobuf.unsafe_advance iobuf payload_length)
     with
     | `Cannot_parse_uint64_length -> Cannot_parse_uint64_length
     | `Consumed_header -> Consumed_one_frame
@@ -607,12 +607,12 @@ module Frame_reader = struct
                ~payload_availability:`Incomplete_payload_ok
                ~mask:t.mask
                ~f:(fun ~masked ~final ~opcode ~payload_length ->
-               t.masked <- masked;
-               t.final <- final;
-               t.opcode <- opcode;
-               t.payload_length <- payload_length;
-               t.remaining_payload_to_consume <- payload_length;
-               t.unmasked_length <- 0)
+                 t.masked <- masked;
+                 t.final <- final;
+                 t.opcode <- opcode;
+                 t.payload_length <- payload_length;
+                 t.remaining_payload_to_consume <- payload_length;
+                 t.unmasked_length <- 0)
            with
            | `No_frame_header -> `Return_no_frame
            | `Incomplete_frame_header | `Incomplete_frame -> `Return_incomplete_frame

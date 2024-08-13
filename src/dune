@@ -1,6 +1,7 @@
 (library
  (name websocket)
  (public_name async_websocket)
- (libraries async core_kernel.binary_packing core_kernel.bus cryptokit)
+ (libraries async async_rpc_kernel core_kernel.binary_packing core_kernel.bus
+   core cryptokit core_kernel.iobuf)
  (preprocess
   (pps ppx_jane)))
