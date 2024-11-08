@@ -267,7 +267,7 @@ module Frame_reader = struct
     end
 
     val payload_length : t -> Payload_length.t
-    val masked : t -> bool
+    val masked : local_ t -> bool
   end = struct
     type t = int
 
@@ -319,7 +319,7 @@ module Frame_reader = struct
       return ()
     ;;
 
-    let masked t = bit_is_set 7 t
+    let masked (local_ t) = bit_is_set 7 t
   end
 
   module Payload_length_with_extension : sig
@@ -334,7 +334,11 @@ module Frame_reader = struct
       type packed = T : 'a t -> packed [@@unboxed]
     end
 
-    val consume : header_part2:Header_part2.t -> iobuf:(read, Iobuf.seek) Iobuf.t -> t
+    val consume
+      :  header_part2:Header_part2.t
+      -> iobuf:local_ (read, Iobuf.seek) Iobuf.t
+      -> t
+
     val meaning : t -> Meaning.packed
     val to_int : t -> int Meaning.t -> int
   end = struct
@@ -364,7 +368,7 @@ module Frame_reader = struct
 
     let to_int : t -> int Meaning.t -> int = fun t Length -> t
 
-    let consume ~header_part2 ~iobuf =
+    let consume ~header_part2 ~(local_ iobuf) =
       let payload_length = Header_part2.payload_length header_part2 in
       match Header_part2.Payload_length.meaning payload_length with
       | T Extended_payload_len_uint16 ->
@@ -383,12 +387,12 @@ module Frame_reader = struct
 
   module Mask : sig
     val consume
-      :  header_part2:Header_part2.t
-      -> mask:Bytes.t
-      -> (read, Iobuf.seek) Iobuf.t
+      :  header_part2:local_ Header_part2.t
+      -> mask:local_ Bytes.t
+      -> local_ (read, Iobuf.seek) Iobuf.t
       -> [ `Mask | `Incomplete_frame | `No_mask_needed ]
   end = struct
-    let consume ~header_part2 ~mask iobuf =
+    let consume ~(local_ header_part2) ~(local_ mask) (local_ iobuf) =
       match Header_part2.masked header_part2 with
       | false -> `No_mask_needed
       | true ->
@@ -438,7 +442,7 @@ module Frame_reader = struct
               ~masked:(Header_part2.masked header_part2)))
   ;;
 
-  let maybe_consume_header iobuf ~payload_availability ~mask ~f =
+  let maybe_consume_payload_length (local_ iobuf) = exclave_
     match Iobuf.length iobuf with
     | 0 -> `No_frame_header
     | len when len < 2 -> `Incomplete_frame_header
@@ -447,7 +451,9 @@ module Frame_reader = struct
       let header_part1 = Iobuf.Unsafe.Consume.int8 iobuf in
       let header_part2 = iobuf |> Iobuf.Unsafe.Consume.int8 |> Header_part2.of_int8 in
       let payload_length =
-        Payload_length_with_extension.consume ~header_part2 ~iobuf:(Iobuf.read_only iobuf)
+        Payload_length_with_extension.consume
+          ~header_part2
+          ~iobuf:(Iobuf.read_only_local iobuf)
       in
       (match Payload_length_with_extension.meaning payload_length with
        | T Cannot_parse_uint64_length ->
@@ -460,27 +466,46 @@ module Frame_reader = struct
          let payload_length =
            Payload_length_with_extension.to_int payload_length meaning
          in
-         (match Mask.consume ~header_part2 ~mask (Iobuf.read_only iobuf) with
-          | `Incomplete_frame ->
+         `Consumed_payload_length (header_part1, header_part2, payload_length))
+  ;;
+
+  let get_payload_length (local_ iobuf) = exclave_
+    match maybe_consume_payload_length iobuf with
+    | `Cannot_parse_uint64_length -> `Cannot_parse_uint64_length
+    | `Incomplete_frame_header -> `Incomplete_frame_header
+    | `No_frame_header -> `No_frame_header
+    | `Consumed_payload_length (_, _, payload_length) -> `Payload_length payload_length
+  ;;
+
+  let maybe_consume_header (local_ iobuf) ~payload_availability ~(local_ mask) ~(local_ f)
+    =
+    let lo = Iobuf.Lo_bound.window iobuf in
+    match maybe_consume_payload_length iobuf with
+    | `No_frame_header -> `No_frame_header
+    | `Incomplete_frame_header -> `Incomplete_frame_header
+    | `Cannot_parse_uint64_length -> `Cannot_parse_uint64_length
+    | `Consumed_payload_length (header_part1, header_part2, payload_length) ->
+      (match Mask.consume ~header_part2 ~mask (Iobuf.read_only_local iobuf) with
+       | `Incomplete_frame ->
+         Iobuf.Lo_bound.restore lo iobuf;
+         `Incomplete_frame_header
+       | (`No_mask_needed | `Mask) as masked ->
+         let okay_to_consume =
+           match payload_availability with
+           | `Entire_payload_must_be_available -> Iobuf.length iobuf >= payload_length
+           | `Incomplete_payload_ok -> true
+         in
+         (match okay_to_consume with
+          | false ->
             Iobuf.Lo_bound.restore lo iobuf;
-            `Incomplete_frame_header
-          | (`No_mask_needed | `Mask) as masked ->
-            let okay_to_consume =
-              match payload_availability with
-              | `Entire_payload_must_be_available -> Iobuf.length iobuf >= payload_length
-              | `Incomplete_payload_ok -> true
-            in
-            (match okay_to_consume with
-             | false ->
-               Iobuf.Lo_bound.restore lo iobuf;
-               `Incomplete_frame
-             | true ->
-               f
-                 ~masked
-                 ~final:(bit_is_set 7 header_part1)
-                 ~opcode:(Opcode.of_int (int_value 0 4 header_part1))
-                 ~payload_length;
-               `Consumed_header)))
+            `Incomplete_frame
+          | true ->
+            f
+              ~masked
+              ~final:(bit_is_set 7 header_part1)
+              ~opcode:(Opcode.of_int (int_value 0 4 header_part1))
+              ~payload_length;
+            `Consumed_header))
   ;;
 
   let consume_frame t (iobuf : (read_write, Iobuf.seek) Iobuf.t) : Read_result.t =
@@ -665,5 +690,8 @@ module Frame_reader = struct
          | false -> Incomplete_frame
          | true -> Consumed_one_frame)
     ;;
+
+    let maybe_consume_header = maybe_consume_header
+    let get_payload_length = get_payload_length
   end
 end

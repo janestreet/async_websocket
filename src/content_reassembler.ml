@@ -2,8 +2,8 @@ open Core
 
 type t =
   { mutable partial_content : (read_write, Iobuf.seek) Iobuf.t
-  ; content_handler : (read, Iobuf.no_seek) Iobuf.t -> unit
-  ; ping_handler : content:(read, Iobuf.no_seek) Iobuf.t -> unit
+  ; content_handler : local_ (read, Iobuf.no_seek) Iobuf.t -> unit
+  ; ping_handler : content:local_ (read, Iobuf.no_seek) Iobuf.t -> unit
   ; close_handler :
       code:Connection_close_reason.t
       -> reason:string
@@ -73,18 +73,18 @@ let process_frame
   t
   ~(opcode : Opcode.t)
   ~(final : bool)
-  ~(content : (read, Iobuf.no_seek) Iobuf.t)
+  ~(local_ content : (read, Iobuf.no_seek) Iobuf.t)
   =
   match opcode with
   | Close ->
-    Iobuf.protect_window_bounds_and_buffer content ~f:(fun content ->
-      let code =
-        if Iobuf.length content >= 2
-        then Connection_close_reason.of_int (Iobuf.Consume.int16_be content)
-        else Unknown 0
-      in
-      let reason = Iobuf.Consume.stringo content in
-      t.close_handler ~code ~reason ~partial_content:None)
+    let content = Iobuf.sub_shared_local content in
+    let code =
+      if Iobuf.length content >= 2
+      then Connection_close_reason.of_int (Iobuf.Consume.int16_be content)
+      else Unknown 0
+    in
+    let reason = Iobuf.Consume.stringo content in
+    t.close_handler ~code ~reason ~partial_content:None
   | Ping -> t.ping_handler ~content
   | Pong | Ctrl (_ : int) -> ()
   | Text | Binary | Nonctrl (_ : int) ->
@@ -107,9 +107,10 @@ let process_frame
             continue."
          ~partial_content:None
          ~frame:(Some { opcode; final; content = Iobuf.to_string content })
-     | `Has_partial_content, false -> append_content t (Iobuf.no_seek content)
+     | `Has_partial_content, false ->
+       append_content t (Iobuf.no_seek_local content) [@nontail]
      | `Has_partial_content, true ->
-       append_content t (Iobuf.no_seek content);
+       append_content t (Iobuf.no_seek_local content);
        Iobuf.flip_lo t.partial_content;
        t.content_handler (Iobuf.read_only (Iobuf.no_seek t.partial_content));
        clear_partial_content t)
