@@ -453,7 +453,7 @@ module Frame_reader = struct
       let payload_length =
         Payload_length_with_extension.consume
           ~header_part2
-          ~iobuf:(Iobuf.read_only_local iobuf)
+          ~iobuf:(Iobuf.read_only__local iobuf)
       in
       (match Payload_length_with_extension.meaning payload_length with
        | T Cannot_parse_uint64_length ->
@@ -485,7 +485,7 @@ module Frame_reader = struct
     | `Incomplete_frame_header -> `Incomplete_frame_header
     | `Cannot_parse_uint64_length -> `Cannot_parse_uint64_length
     | `Consumed_payload_length (header_part1, header_part2, payload_length) ->
-      (match Mask.consume ~header_part2 ~mask (Iobuf.read_only_local iobuf) with
+      (match Mask.consume ~header_part2 ~mask (Iobuf.read_only__local iobuf) with
        | `Incomplete_frame ->
          Iobuf.Lo_bound.restore lo iobuf;
          `Incomplete_frame_header

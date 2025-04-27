@@ -17,7 +17,7 @@ depends: [
   "core_kernel"
   "ppx_jane"
   "cryptokit"        {>= "1.16" & < "1.17"}
-  "dune"             {>= "3.11.0"}
+  "dune"             {>= "3.17.0"}
 ]
 available: arch != "arm32" & arch != "x86_32"
 synopsis: "A library that implements the websocket protocol on top of Async"
