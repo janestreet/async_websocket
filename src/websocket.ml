@@ -28,9 +28,43 @@ type raw =
   ; closed : (Connection_close_reason.t * string * Info.t option) Ivar.t
   }
 
-type t =
+module Frame_content = struct
+  module Opcode = struct
+    type t =
+      | Text
+      | Binary
+      | Nonctrl of int
+    [@@deriving sexp_of]
+
+    let to_opcode = function
+      | Text -> Opcode.Text
+      | Binary -> Binary
+      | Nonctrl nonctrl -> Nonctrl nonctrl
+    ;;
+
+    let of_opcode_exn = function
+      | Opcode.Text -> Text
+      | Binary -> Binary
+      | Nonctrl nonctrl -> Nonctrl nonctrl
+      | opcode ->
+        failwiths
+          "Unexpected opcode when constructing websocket frames. Only \
+           Text/Binary/Nonctrl are allowed."
+          opcode
+          Opcode.sexp_of_t
+    ;;
+  end
+
+  type t =
+    { opcode : Opcode.t
+    ; content : string
+    }
+  [@@deriving sexp_of]
+end
+
+type 'msg t =
   { raw : raw
-  ; pipes : string Pipe.Reader.t * string Pipe.Writer.t
+  ; pipes : 'msg Pipe.Reader.t * 'msg Pipe.Writer.t
   ; read_opcode_bus : (Opcode.t -> unit) Bus.Read_write.t
   ; masked : bool
   }
@@ -41,7 +75,7 @@ let close_cleanly ~code ~reason ~info ws =
 ;;
 
 let transport t =
-  let reader, writer = t.pipes in
+  let reader, writer = pipes t in
   Async_rpc_kernel.Pipe_transport.create
     Async_rpc_kernel.Pipe_transport.Kind.string
     reader
@@ -71,10 +105,15 @@ module Pipes = struct
              }])
   ;;
 
-  let recv_pipe ~read_opcode_bus ~masked (ws : raw) =
+  let recv_pipe ~of_frame_content ~read_opcode_bus ~masked (ws : raw) =
     Pipe.create_reader ~close_on_exception:true (fun writer ->
-      let content_handler content =
-        Pipe.write_without_pushback_if_open writer (Iobuf.to_string content)
+      let content_handler ~content ~opcode =
+        Pipe.write_without_pushback_if_open
+          writer
+          (of_frame_content
+             { Frame_content.opcode = Frame_content.Opcode.of_opcode_exn opcode
+             ; content = Iobuf.to_string content
+             })
       in
       let ping_handler ~content =
         Frame.write_frame
@@ -160,12 +199,16 @@ module Pipes = struct
       return ())
   ;;
 
-  let send_pipe ~opcode ~masked (ws : raw) =
-    let write_message msg =
-      Frame.write_frame ws.writer ~masked (Frame.create ~opcode msg)
+  let send_pipe ~to_frame_content ~masked (ws : raw) =
+    let write_message ~opcode ~content =
+      Frame.write_frame ws.writer ~masked (Frame.create ~opcode content)
     in
     let to_client_r, to_client_w = Pipe.create () in
-    let to_client_closed = Writer.transfer ws.writer to_client_r write_message in
+    let to_client_closed =
+      Writer.transfer ws.writer to_client_r (fun msg ->
+        let { Frame_content.opcode; content } = to_frame_content msg in
+        write_message ~opcode:(Frame_content.Opcode.to_opcode opcode) ~content)
+    in
     upon to_client_closed (fun () ->
       close_cleanly
         ~code:Connection_close_reason.Normal_closure
@@ -220,18 +263,18 @@ let close_finished
   return res
 ;;
 
-let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
-  let opcode =
-    match opcode with
-    | `Text -> Opcode.Text
-    | `Binary -> Opcode.Binary
-  in
+let create_gen
+  ~of_frame_content
+  ~to_frame_content
+  ~(role : Websocket_role.t)
+  reader
+  writer
+  =
   let masked = Websocket_role.should_mask role in
   let closed = Ivar.create () in
   let ws = { reader; writer; closed } in
   let read_opcode_bus =
     Bus.create_exn
-      [%here]
       Bus.Callback_arity.Arity1
       ~on_subscription_after_first_write:Bus.On_subscription_after_first_write.Allow
       ~on_callback_raise:(fun (_ : Error.t) -> ())
@@ -239,8 +282,8 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
   don't_wait_for
     (let%map () = Ivar.read closed |> Deferred.ignore_m in
      Bus.close read_opcode_bus);
-  let reader = Pipes.recv_pipe ~read_opcode_bus ~masked ws in
-  let writer = Pipes.send_pipe ~opcode ~masked ws in
+  let reader = Pipes.recv_pipe ~of_frame_content ~read_opcode_bus ~masked ws in
+  let writer = Pipes.send_pipe ~to_frame_content ~masked ws in
   let when_reader_closes__close_t =
     let%map () = Pipe.closed reader in
     close_cleanly
@@ -259,6 +302,21 @@ let create ?(opcode = `Text) ~(role : Websocket_role.t) reader writer =
   t
 ;;
 
+let create ?(opcode = `Text) ~role reader writer =
+  let opcode =
+    match opcode with
+    | `Text -> Frame_content.Opcode.Text
+    | `Binary -> Binary
+  in
+  let to_frame_content content = { Frame_content.opcode; content } in
+  let of_frame_content frame = frame.Frame_content.content in
+  create_gen ~of_frame_content ~to_frame_content ~role reader writer
+;;
+
+let create' ~role reader writer =
+  create_gen ~of_frame_content:Fn.id ~to_frame_content:Fn.id ~role reader writer
+;;
+
 let monitor_pongs
   ?(time_source = Time_source.wall_clock ())
   ~ping_every
@@ -268,7 +326,7 @@ let monitor_pongs
   =
   let pong_received = Bvar.create () in
   let (_ : (Opcode.t -> unit) Bus.Subscriber.t) =
-    Bus.subscribe_exn t.read_opcode_bus [%here] ~f:(function
+    Bus.subscribe_exn t.read_opcode_bus ~f:(function
       | Pong -> Bvar.broadcast pong_received ()
       | Continuation | Text | Binary | Close | Ping | Ctrl _ | Nonctrl _ -> ())
   in
@@ -301,14 +359,14 @@ let%expect_test "partial frame handling" =
     let%bind () = Writer.save fname ~contents:(String.sub s ~pos:0 ~len) in
     let%bind reader = Reader.open_file fname
     and writer = Writer.open_file "/dev/null" in
-    let ws = create ~role:Server reader writer in
+    let ws = create' ~role:Server reader writer in
     let r, _w = pipes ws in
     let%bind q = Pipe.read_all r in
     let%bind code, reason, info = close_finished ws in
     print_s
       [%sexp
         { input_size = (len : int)
-        ; content_read = (q : string Queue.t)
+        ; content_read = (q : Frame_content.t Queue.t)
         ; close_code = (code : Connection_close_reason.t)
         ; close_reason = (reason : string)
         ; other_info = (info : (Info.t option[@sexp.option]))
@@ -366,33 +424,43 @@ let%expect_test "partial frame handling" =
     ((input_size 6) (content_read ()) (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\129\005hell"))))
-    ((input_size 7) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 7) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close unexpectedly without a 'Close' websocket frame"))
-    ((input_size 8) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 8) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136"))))
-    ((input_size 9) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 9) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b"))))
-    ((input_size 10) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 10) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000"))))
-    ((input_size 11) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 11) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000\002"))))
-    ((input_size 12) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 12) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000\002r"))))
-    ((input_size 13) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 13) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000\002re"))))
-    ((input_size 14) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 14) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000\002rea"))))
-    ((input_size 15) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 15) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000\002reas"))))
-    ((input_size 16) (content_read (hello)) (close_code Protocol_error)
+    ((input_size 16) (content_read (((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close with an incomplete websocket frame")
      (other_info ((unconsumed_data "\136\b\000\002reaso"))))
     |}];
@@ -400,14 +468,17 @@ let%expect_test "partial frame handling" =
   [%expect
     {|
     (full_contents "\129\005hello\136\b\000\002reason")
-    ((input_size 17) (content_read (hello)) (close_code (Unknown 2))
-     (close_reason reason))
+    ((input_size 17) (content_read (((opcode Text) (content hello))))
+     (close_code (Unknown 2)) (close_reason reason))
     |}];
   let%bind () = print_frames [ text_frame "hello"; text_frame "hello" ] in
   [%expect
     {|
     (full_contents "\129\005hello\129\005hello")
-    ((input_size 14) (content_read (hello hello)) (close_code Protocol_error)
+    ((input_size 14)
+     (content_read
+      (((opcode Text) (content hello)) ((opcode Text) (content hello))))
+     (close_code Protocol_error)
      (close_reason "Pipe close unexpectedly without a 'Close' websocket frame"))
     |}];
   let%bind () =
@@ -417,8 +488,8 @@ let%expect_test "partial frame handling" =
   [%expect
     {|
     (full_contents "\001\003hel\128\002lo\136\b\000\002reason")
-    ((input_size 19) (content_read (hello)) (close_code (Unknown 2))
-     (close_reason reason))
+    ((input_size 19) (content_read (((opcode Text) (content hello))))
+     (close_code (Unknown 2)) (close_reason reason))
     |}];
   let%bind () = print_frames [ text_frame ~final:false "hello"; text_frame "bye" ] in
   [%expect
