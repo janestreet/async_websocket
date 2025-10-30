@@ -43,11 +43,11 @@ module Iobuf_writer : sig
       - Invoke [finish_write]. *)
   val start_write
     :  t
-    -> (read_write, Iobuf.seek) Iobuf.t
+    -> (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
     -> opcode:Opcode.t
     -> final:bool
     -> content_len:int
-    -> (read_write, Iobuf.seek) Iobuf.t
+    -> (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
 
   (** Finishes writing a frame to the given iobuf. Raises if the iobuf still has a nonzero
       length. *)
@@ -70,7 +70,7 @@ module Frame_reader : sig
     :  frame_handler:
          (opcode:Opcode.t
           -> final:bool
-          -> content:(read, Iobuf.no_seek) Iobuf.t
+          -> content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t
           -> masked:[ `Content_was_masked | `Content_was_not_masked ]
                (** [masked] indicates if the received content was masked, which is useful
                    for a websocket server to enforce that clients are masking the content.
@@ -84,15 +84,15 @@ module Frame_reader : sig
 
       If the frame's content is masked, [consume_frame] will modify the iobuf inline to
       unmask it. *)
-  val consume_frame : t -> (read_write, Iobuf.seek) Iobuf.t -> Read_result.t
+  val consume_frame : t -> (read_write, Iobuf.seek, Iobuf.global) Iobuf.t -> Read_result.t
 
   (** Useful when we only received a partial frame but still want to know expected the
       size of the full frame. *)
-  val expected_frame_bytes : (read, Iobuf.seek) Iobuf.t -> int option
+  val expected_frame_bytes : (read, Iobuf.seek, Iobuf.global) Iobuf.t -> int option
 
   val consume_all_available_frames
     :  t
-    -> (read_write, Iobuf.seek) Iobuf.t
+    -> (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
     -> [ `Consumed_as_much_as_possible
        | `Consumed_until_incomplete_frame
        | `Cannot_parse_uint64_length
@@ -111,7 +111,7 @@ module Frame_reader : sig
       -> payload_pos:int
            (** Indicates the offset into the totality of the payload where [payload]
                starts *)
-      -> payload_fragment:(read, Iobuf.seek) Iobuf.t
+      -> payload_fragment:(read, Iobuf.seek, Iobuf.global) Iobuf.t
       -> masked:[ `Payload_was_masked | `Payload_was_not_masked ]
            (** [masked] indicates if the received payload was masked, which is useful for
                a websocket server to enforce that clients are masking the payload.
@@ -133,11 +133,11 @@ module Frame_reader : sig
         data, or whenever the caller can handle more payload data. *)
     val consume_frame_even_if_incomplete_payload
       :  t
-      -> (read_write, Iobuf.seek) Iobuf.t
+      -> (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
       -> Read_result.t
 
     val maybe_consume_header
-      :  ([> read ], Iobuf.seek) Iobuf.t
+      :  ([> read ], Iobuf.seek, Iobuf.global) Iobuf.t
       -> payload_availability:
            [< `Entire_payload_must_be_available | `Incomplete_payload_ok ]
       -> mask:bytes
@@ -155,7 +155,7 @@ module Frame_reader : sig
          ]
 
     val get_payload_length
-      :  ([> read ], Iobuf.seek) Iobuf.t
+      :  ([> read ], Iobuf.seek, Iobuf.global) Iobuf.t
       -> [ `Cannot_parse_uint64_length
          | `Incomplete_frame_header
          | `No_frame_header

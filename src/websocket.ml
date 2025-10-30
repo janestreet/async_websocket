@@ -144,7 +144,7 @@ module Pipes = struct
           let frame_handler
             ~(opcode : Opcode.t)
             ~(final : bool)
-            ~(content : (read, Iobuf.no_seek) Iobuf.t)
+            ~(content : (read, Iobuf.no_seek, Iobuf.global) Iobuf.t)
             ~masked:_
             =
             if not (Bus.is_closed read_opcode_bus) then Bus.write read_opcode_bus opcode;

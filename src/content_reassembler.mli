@@ -12,11 +12,12 @@ open Core
 type t
 
 val create
-  :  content_handler:(content:(read, Iobuf.no_seek) Iobuf.t -> opcode:Opcode.t -> unit)
+  :  content_handler:
+       (content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t -> opcode:Opcode.t -> unit)
        (** [content_handler] is called when text, binary, or non-control content is
            completed. If the content was fragmented, [content_handler] is only called on
            the final frame, when the full, unfragmented contents has been collected. *)
-  -> ping_handler:(content:(read, Iobuf.no_seek) Iobuf.t -> unit)
+  -> ping_handler:(content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t -> unit)
        (** [ping_handler] is called whenever a ping message is received. Since ping
            messages cannot be fragmented, [content] corresponds to the content of a single
            ping frame. *)
@@ -43,7 +44,7 @@ val process_frame
   :  t
   -> opcode:Opcode.t
   -> final:bool
-  -> content:(read, Iobuf.no_seek) Iobuf.t
+  -> content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t
   -> unit
 
 (** [partial_content_string] yields the content of the contents of the most recent (yet

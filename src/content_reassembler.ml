@@ -1,7 +1,7 @@
 open Core
 
 type t =
-  { mutable partial_content : (read_write, Iobuf.seek) Iobuf.t
+  { mutable partial_content : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
   ; mutable partial_opcode : Opcode.t
   (** [partial_content] and [partial_opcode] together tracks partial messages. Whenever
       [partial_content] has content in its buffer, [partial_opcode] indicates the type of
@@ -9,8 +9,9 @@ type t =
 
       Otherwise the value of [partial_opcode] is set to [Continuation]. It's invalid for a
       frame opcode and we use that to indicate [None] to avoid allocation. *)
-  ; content_handler : content:(read, Iobuf.no_seek) Iobuf.t -> opcode:Opcode.t -> unit
-  ; ping_handler : content:(read, Iobuf.no_seek) Iobuf.t -> unit
+  ; content_handler :
+      content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t -> opcode:Opcode.t -> unit
+  ; ping_handler : content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t -> unit
   ; close_handler :
       code:Connection_close_reason.t
       -> reason:string
@@ -62,7 +63,7 @@ let create
   }
 ;;
 
-let append_content t (content : (read, Iobuf.no_seek) Iobuf.t) =
+let append_content t (content : (read, Iobuf.no_seek, Iobuf.global) Iobuf.t) =
   let content_len = Iobuf.length content in
   let available_len = Iobuf.length t.partial_content in
   let has_enough_space = available_len >= content_len in
@@ -81,7 +82,7 @@ let process_frame
   t
   ~(opcode : Opcode.t)
   ~(final : bool)
-  ~(content : (read, Iobuf.no_seek) Iobuf.t)
+  ~(content : (read, Iobuf.no_seek, Iobuf.global) Iobuf.t)
   =
   match opcode with
   | Close ->
