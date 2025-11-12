@@ -152,8 +152,8 @@ let max_content_bytes ~max_frame_bytes ~masked =
 module Iobuf_writer = struct
   type t =
     { mask : Bytes.t
-    ; content_window : (read_write, Iobuf.seek) Iobuf.t
-    ; mutable output_iobuf : (read_write, Iobuf.seek) Iobuf.t
+    ; content_window : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
+    ; mutable output_iobuf : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
     ; role : [ `Client of Base.Random.State.t | `Server ]
     }
 
@@ -336,7 +336,7 @@ module Frame_reader = struct
 
     val consume
       :  header_part2:Header_part2.t
-      -> iobuf:local_ (read, Iobuf.seek) Iobuf.t
+      -> iobuf:local_ (read, Iobuf.seek, Iobuf.global) Iobuf.t
       -> t
 
     val meaning : t -> Meaning.packed
@@ -389,7 +389,7 @@ module Frame_reader = struct
     val consume
       :  header_part2:local_ Header_part2.t
       -> mask:local_ Bytes.t
-      -> local_ (read, Iobuf.seek) Iobuf.t
+      -> local_ (read, Iobuf.seek, Iobuf.global) Iobuf.t
       -> [ `Mask | `Incomplete_frame | `No_mask_needed ]
   end = struct
     let consume ~(local_ header_part2) ~(local_ mask) (local_ iobuf) =
@@ -406,7 +406,7 @@ module Frame_reader = struct
 
   type t =
     { frame_handler :
-        (read, Iobuf.seek) Iobuf.t
+        (read, Iobuf.seek, Iobuf.global) Iobuf.t
         -> Opcode.t
         -> bool
         -> [ `Content_was_masked | `Content_was_not_masked ]
@@ -421,7 +421,8 @@ module Frame_reader = struct
     { frame_handler; mask = Bytes.create 4 }
   ;;
 
-  let expected_frame_bytes (iobuf : (read, Iobuf.seek) Iobuf.t) : int option =
+  let expected_frame_bytes (iobuf : (read, Iobuf.seek, Iobuf.global) Iobuf.t) : int option
+    =
     match Iobuf.length iobuf with
     | 0 -> None
     | len when len < 2 -> None
@@ -508,7 +509,9 @@ module Frame_reader = struct
             `Consumed_header))
   ;;
 
-  let consume_frame t (iobuf : (read_write, Iobuf.seek) Iobuf.t) : Read_result.t =
+  let consume_frame t (iobuf : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t)
+    : Read_result.t
+    =
     match
       maybe_consume_header
         iobuf
@@ -558,7 +561,7 @@ module Frame_reader = struct
       -> final:bool
       -> total_frame_payload_len:int
       -> payload_pos:int
-      -> payload_fragment:(read, Iobuf.seek) Iobuf.t
+      -> payload_fragment:(read, Iobuf.seek, Iobuf.global) Iobuf.t
       -> masked:[ `Payload_was_masked | `Payload_was_not_masked ]
       -> unit
 
@@ -571,7 +574,7 @@ module Frame_reader = struct
       ; mutable masked : [ `No_mask_needed | `Mask ]
       ; mutable opcode : Opcode.t
       ; mutable final : bool
-      ; output_iobuf : (read_write, Iobuf.seek) Iobuf.t
+      ; output_iobuf : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t
       }
 
     let create ~partial_frame_handler =
@@ -591,7 +594,7 @@ module Frame_reader = struct
       t
       iobuf
       ~remaining_payload_length
-      ~(f : (read_write, Iobuf.seek) Iobuf.t -> unit)
+      ~(f : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t -> unit)
       =
       let iobuf_length = Iobuf.length iobuf in
       let possible_consume_length = min iobuf_length remaining_payload_length in
@@ -619,7 +622,7 @@ module Frame_reader = struct
 
     let consume_frame_even_if_incomplete_payload
       t
-      (iobuf : (read_write, Iobuf.seek) Iobuf.t)
+      (iobuf : (read_write, Iobuf.seek, Iobuf.global) Iobuf.t)
       : Read_result.t
       =
       let follow_up_action =
