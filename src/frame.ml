@@ -19,20 +19,17 @@ end
 (* Extensions aren't implemented *)
 let create ~opcode ?(final = true) content = { opcode; final; content }
 
-(* See rfc6455 - 5.5.1
-   The Close frame MAY contain a body (the "Application data" portion of
-   the frame) that indicates a reason for closing, such as an endpoint
-   shutting down, an endpoint having received a frame too large, or an
-   endpoint having received a frame that does not conform to the format
-   expected by the endpoint.  If there is a body, the first two bytes of
-   the body MUST be a 2-byte unsigned integer (in network byte order)
-   representing a status code with value /code/ defined in Section 7.4.
-   Following the 2-byte integer, the body MAY contain UTF-8-encoded data
-   with value /reason/, the interpretation of which is not defined by
-   this specification.  This data is not necessarily human readable but
-   may be useful for debugging or passing information relevant to the
-   script that opened the connection.  As the data is not guaranteed to
-   be human readable, clients MUST NOT show it to end users. *)
+(* See rfc6455 - 5.5.1 The Close frame MAY contain a body (the "Application data" portion
+   of the frame) that indicates a reason for closing, such as an endpoint shutting down,
+   an endpoint having received a frame too large, or an endpoint having received a frame
+   that does not conform to the format expected by the endpoint. If there is a body, the
+   first two bytes of the body MUST be a 2-byte unsigned integer (in network byte order)
+   representing a status code with value /code/ defined in Section 7.4. Following the
+   2-byte integer, the body MAY contain UTF-8-encoded data with value /reason/, the
+   interpretation of which is not defined by this specification. This data is not
+   necessarily human readable but may be useful for debugging or passing information
+   relevant to the script that opened the connection. As the data is not guaranteed to be
+   human readable, clients MUST NOT show it to end users. *)
 let create_close ~code ?final content =
   let len = String.length content in
   let content' = Bytes.create (len + 2) in
@@ -194,16 +191,16 @@ module Iobuf_writer = struct
     =
     t.output_iobuf <- frame_buffer;
     let opcode = Opcode.to_int opcode in
-    (* "A client MUST mask all frames that it sends to the server."
-       "A server MUST NOT mask any frames that it sends to the client." *)
+    (* "A client MUST mask all frames that it sends to the server." "A server MUST NOT
+       mask any frames that it sends to the client." *)
     let hdr =
       make_hdr
         ~final
         ~opcode
         ~masked:
           (match t.role with
-           (* "A client MUST mask all frames that it sends to the server."
-              "A server MUST NOT mask any frames that it sends to the client." *)
+           (* "A client MUST mask all frames that it sends to the server." "A server MUST
+              NOT mask any frames that it sends to the client." *)
            | `Server -> false
            | `Client _ -> true)
         ~len:content_len
@@ -307,8 +304,8 @@ module Frame_reader = struct
       | 127 -> Payload_length.extended_payload_len_uint64
       | i when i >= 0 && i < 126 -> i
       | _ ->
-        (* This will never be reached because the matched value is constructed
-           with only 7 bits. *)
+        (* This will never be reached because the matched value is constructed with only 7
+           bits. *)
         assert false
     ;;
 
@@ -360,8 +357,8 @@ module Frame_reader = struct
       | x when x = cannot_parse_uint64_length -> T Cannot_parse_uint64_length
       | x when x = incomplete_frame -> T Incomplete_frame
       | x when x < 0 ->
-        (* This will never be reached because [t] is constructed with only 7 bits, and
-           the possible negative cases are explicitely handled above. *)
+        (* This will never be reached because [t] is constructed with only 7 bits, and the
+           possible negative cases are explicitely handled above. *)
         assert false
       | _ -> T Length
     ;;
@@ -519,8 +516,8 @@ module Frame_reader = struct
         ~mask:t.mask
         ~f:(fun ~masked ~final ~opcode ~payload_length ->
           let process_frame_content iobuf =
-            (* Unmask the frame inline. This should be okay now that we know for sure
-               we can process the frame. *)
+            (* Unmask the frame inline. This should be okay now that we know for sure we
+               can process the frame. *)
             let masked =
               match masked with
               | `No_mask_needed -> `Content_was_not_masked
@@ -653,8 +650,8 @@ module Frame_reader = struct
       | `Return_cannot_parse_uint64_length -> Cannot_parse_uint64_length
       | `Consume_remaining_payload ->
         let process_payload iobuf =
-          (* Unmask the frame inline. This should be okay now that we know for sure
-             we can process the frame. *)
+          (* Unmask the frame inline. This should be okay now that we know for sure we can
+             process the frame. *)
           let payload_pos = t.payload_length - t.remaining_payload_to_consume in
           let masked =
             match t.masked with

@@ -7,10 +7,8 @@ type t =
   | Close
   | Ping
   | Pong
-  (*
-     RFC 6455:
-     Opcodes 0x3-0x7 are reserved for further non-control frames yet to be defined.
-     Opcodes 0xB-0xF are reserved for further control frames yet to be defined.
+  (* RFC 6455: Opcodes 0x3-0x7 are reserved for further non-control frames yet to be
+     defined. Opcodes 0xB-0xF are reserved for further control frames yet to be defined.
   *)
   | Ctrl of (int[@quickcheck.generator Int.gen_incl 0xB 0xF])
   | Nonctrl of (int[@quickcheck.generator Int.gen_incl 0x3 0x7])
