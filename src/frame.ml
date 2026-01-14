@@ -215,8 +215,11 @@ module Iobuf_writer = struct
      | `Client random_state ->
        regenerate_random_mask t ~random_state;
        Iobuf.Fill.byteso t.output_iobuf t.mask);
-    Iobuf.resize t.output_iobuf ~len:content_len;
-    Iobuf.Expert.set_bounds_and_buffer ~src:t.output_iobuf ~dst:t.content_window;
+    Iobuf.Expert.set_bounds_and_buffer_sub
+      ~pos:0
+      ~len:content_len
+      ~src:t.output_iobuf
+      ~dst:t.content_window;
     t.content_window
   ;;
 
@@ -225,7 +228,11 @@ module Iobuf_writer = struct
     (match t.role with
      | `Server -> ()
      | `Client _ -> xor_iobuf_with_mask t.output_iobuf t.mask ~offset:0);
-    Iobuf.advance t.output_iobuf (Iobuf.length t.output_iobuf)
+    (* Because [t.content_window] was originally made from [t.output_iobuf], we can set
+       the [lo] of [t.output_iobuf] to the [lo] of [t.content_window] to effectively
+       advance [t.output_buf] by [content_len] *)
+    let new_lo = Iobuf.Lo_bound.window t.content_window in
+    Iobuf.Lo_bound.restore new_lo t.output_iobuf
   ;;
 end
 

@@ -275,9 +275,9 @@ let create_gen
   let ws = { reader; writer; closed } in
   let read_opcode_bus =
     Bus.create_exn
-      Bus.Callback_arity.Arity1
       ~on_subscription_after_first_write:Bus.On_subscription_after_first_write.Allow
       ~on_callback_raise:(fun (_ : Error.t) -> ())
+      ()
   in
   don't_wait_for
     (let%map () = Ivar.read closed |> Deferred.ignore_m in
