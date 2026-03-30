@@ -239,7 +239,7 @@ let close
   Frame.write_frame ws.writer ~masked (Frame.create_close ~code reason);
   (* Wait for the writer to be flushed before actually closing it, otherwise the closing
      frame won't be sent. *)
-  let%bind () = Writer.flushed ws.writer in
+  let%bind () = Writer.flushed_or_failed_unit ws.writer in
   let%bind () = Writer.close ws.writer in
   let%bind () = Reader.close ws.reader in
   Pipe.close_read pipe_reader;
