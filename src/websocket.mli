@@ -57,6 +57,9 @@ val pipes : 'msg t -> 'msg Pipe.Reader.t * 'msg Pipe.Writer.t
 (** Get an RPC transport over websocket *)
 val transport : string t -> Async_rpc_kernel.Rpc.Transport.t
 
+(** Sends a close frame and then closes the underlying reader, writer, and pipes. *)
+val close : _ t -> code:Connection_close_reason.t -> reason:string -> unit Deferred.t
+
 val close_finished
   :  _ t
   -> (Connection_close_reason.t * string * Info.t option) Deferred.t
