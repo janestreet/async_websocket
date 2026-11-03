@@ -225,13 +225,19 @@ module Iobuf_writer = struct
 
   let finish_write_exn t =
     assert (Iobuf.length t.content_window = 0);
+    let new_lo = Iobuf.Lo_bound.window t.content_window in
     (match t.role with
      | `Server -> ()
-     | `Client _ -> xor_iobuf_with_mask t.output_iobuf t.mask ~offset:0);
+     | `Client _ ->
+       (* The content window has been filled, so its window is empty at the end of the
+          payload. Flip it to expose exactly the payload bytes, mask them, then restore
+          the empty window. *)
+       Iobuf.flip_lo t.content_window;
+       xor_iobuf_with_mask t.content_window t.mask ~offset:0;
+       Iobuf.Lo_bound.restore new_lo t.content_window);
     (* Because [t.content_window] was originally made from [t.output_iobuf], we can set
        the [lo] of [t.output_iobuf] to the [lo] of [t.content_window] to effectively
        advance [t.output_buf] by [content_len] *)
-    let new_lo = Iobuf.Lo_bound.window t.content_window in
     Iobuf.Lo_bound.restore new_lo t.output_iobuf
   ;;
 end
@@ -456,9 +462,7 @@ module Frame_reader = struct
       let header_part1 = Iobuf.Unsafe.Consume.int8 iobuf in
       let header_part2 = iobuf |> Iobuf.Unsafe.Consume.int8 |> Header_part2.of_int8 in
       let payload_length =
-        Payload_length_with_extension.consume
-          ~header_part2
-          ~iobuf:(Iobuf.read_only__local iobuf)
+        Payload_length_with_extension.consume ~header_part2 ~iobuf:(Iobuf.read_only iobuf)
       in
       (match Payload_length_with_extension.meaning payload_length with
        | T Cannot_parse_uint64_length ->
@@ -489,7 +493,7 @@ module Frame_reader = struct
     | `Incomplete_frame_header -> `Incomplete_frame_header
     | `Cannot_parse_uint64_length -> `Cannot_parse_uint64_length
     | `Consumed_payload_length (header_part1, header_part2, payload_length) ->
-      (match Mask.consume ~header_part2 ~mask (Iobuf.read_only__local iobuf) with
+      (match Mask.consume ~header_part2 ~mask (Iobuf.read_only iobuf) with
        | `Incomplete_frame ->
          Iobuf.Lo_bound.restore lo iobuf;
          `Incomplete_frame_header

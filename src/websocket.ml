@@ -105,7 +105,7 @@ module Pipes = struct
              }])
   ;;
 
-  let recv_pipe ~of_frame_content ~read_opcode_bus ~masked (ws : raw) =
+  let recv_pipe ~apply_pushback ~of_frame_content ~read_opcode_bus ~masked (ws : raw) =
     Pipe.create_reader ~close_on_exception:true (fun writer ->
       let content_handler ~content ~opcode =
         Pipe.write_without_pushback_if_open
@@ -153,10 +153,21 @@ module Pipes = struct
           Frame_reader.create ~frame_handler
         in
         Reader.read_one_iobuf_at_a_time ws.reader ~handle_chunk:(fun iobuf ->
-          (match Frame_reader.consume_all_available_frames frame_reader iobuf with
-           | `Consumed_as_much_as_possible | `Consumed_until_incomplete_frame -> `Continue
-           | `Cannot_parse_uint64_length -> `Stop `Cannot_parse_uint64_length)
-          |> return)
+          match Frame_reader.consume_all_available_frames frame_reader iobuf with
+          | `Cannot_parse_uint64_length -> return (`Stop `Cannot_parse_uint64_length)
+          | `Consumed_as_much_as_possible | `Consumed_until_incomplete_frame ->
+            (* When [apply_pushback] is set, we refuse to read the next chunk off the
+               socket until the consumer has drained what we've already enqueued. This
+               propagates backpressure down to TCP (the socket buffer fills and the peer's
+               window closes) instead of letting [writer] grow without bound, which is
+               what [Pipe.write_without_pushback_if_open] in [content_handler] would
+               otherwise allow. *)
+            let%map.Eager_deferred () =
+              match apply_pushback with
+              | false -> return ()
+              | true -> Pipe.pushback writer
+            in
+            `Continue)
       in
       (match reader_result with
        | `Eof ->
@@ -272,6 +283,7 @@ let close_finished
 ;;
 
 let create_gen
+  ?(apply_pushback = false)
   ~of_frame_content
   ~to_frame_content
   ~(role : Websocket_role.t)
@@ -290,7 +302,9 @@ let create_gen
   don't_wait_for
     (let%map () = Ivar.read closed |> Deferred.ignore_m in
      Bus.close read_opcode_bus);
-  let reader = Pipes.recv_pipe ~of_frame_content ~read_opcode_bus ~masked ws in
+  let reader =
+    Pipes.recv_pipe ~apply_pushback ~of_frame_content ~read_opcode_bus ~masked ws
+  in
   let writer = Pipes.send_pipe ~to_frame_content ~masked ws in
   let when_reader_closes__close_t =
     let%map () = Pipe.closed reader in
@@ -310,7 +324,7 @@ let create_gen
   t
 ;;
 
-let create ?(opcode = `Text) ~role reader writer =
+let create ?apply_pushback ?(opcode = `Text) ~role reader writer =
   let opcode =
     match opcode with
     | `Text -> Frame_content.Opcode.Text
@@ -318,11 +332,17 @@ let create ?(opcode = `Text) ~role reader writer =
   in
   let to_frame_content content = { Frame_content.opcode; content } in
   let of_frame_content frame = frame.Frame_content.content in
-  create_gen ~of_frame_content ~to_frame_content ~role reader writer
+  create_gen ?apply_pushback ~of_frame_content ~to_frame_content ~role reader writer
 ;;
 
-let create' ~role reader writer =
-  create_gen ~of_frame_content:Fn.id ~to_frame_content:Fn.id ~role reader writer
+let create' ?apply_pushback ~role reader writer =
+  create_gen
+    ?apply_pushback
+    ~of_frame_content:Fn.id
+    ~to_frame_content:Fn.id
+    ~role
+    reader
+    writer
 ;;
 
 let monitor_pongs

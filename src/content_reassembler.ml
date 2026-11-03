@@ -86,7 +86,7 @@ let process_frame
   =
   match opcode with
   | Close ->
-    let content = Iobuf.sub_shared__local content in
+    let content = Iobuf.sub_shared content in
     let code =
       if Iobuf.length content >= 2
       then Connection_close_reason.of_int (Iobuf.Consume.int16_be content)
@@ -118,10 +118,9 @@ let process_frame
             continue."
          ~partial_content:None
          ~frame:(Some { opcode; final; content = Iobuf.to_string content })
-     | `Has_partial_content, false ->
-       append_content t (Iobuf.no_seek__local content) [@nontail]
+     | `Has_partial_content, false -> append_content t (Iobuf.no_seek content) [@nontail]
      | `Has_partial_content, true ->
-       append_content t (Iobuf.no_seek__local content);
+       append_content t (Iobuf.no_seek content);
        Iobuf.flip_lo t.partial_content;
        (match t.partial_opcode with
         | Continuation -> failwith "Unexpected partial_opcode is None"
