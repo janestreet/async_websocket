@@ -137,16 +137,17 @@ module Frame_reader : sig
       -> Read_result.t
 
     val maybe_consume_header
-      :  local_ ([> read ], Iobuf.seek, Iobuf.global) Iobuf.t
+      :  ([> read ], Iobuf.seek, Iobuf.global) Iobuf.t @ local
       -> payload_availability:
            [< `Entire_payload_must_be_available | `Incomplete_payload_ok ]
-      -> mask:local_ bytes
+      -> mask:bytes @ local
       -> f:
-           local_ (masked:[> `Mask | `No_mask_needed ]
-                   -> final:bool
-                   -> opcode:Opcode.t
-                   -> payload_length:int
-                   -> unit)
+           (masked:[> `Mask | `No_mask_needed ]
+            -> final:bool
+            -> opcode:Opcode.t
+            -> payload_length:int
+            -> unit)
+         @ local
       -> [> `Cannot_parse_uint64_length
          | `Consumed_header
          | `Incomplete_frame
@@ -155,11 +156,12 @@ module Frame_reader : sig
          ]
 
     val get_payload_length
-      :  local_ ([> read ], Iobuf.seek, Iobuf.global) Iobuf.t
-      -> local_ [ `Cannot_parse_uint64_length
-                | `Incomplete_frame_header
-                | `No_frame_header
-                | `Payload_length of int
-                ]
+      :  ([> read ], Iobuf.seek, Iobuf.global) Iobuf.t @ local
+      -> [ `Cannot_parse_uint64_length
+         | `Incomplete_frame_header
+         | `No_frame_header
+         | `Payload_length of int
+         ]
+         @ local
   end
 end

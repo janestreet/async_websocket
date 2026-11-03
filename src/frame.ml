@@ -225,13 +225,19 @@ module Iobuf_writer = struct
 
   let finish_write_exn t =
     assert (Iobuf.length t.content_window = 0);
+    let new_lo = Iobuf.Lo_bound.window t.content_window in
     (match t.role with
      | `Server -> ()
-     | `Client _ -> xor_iobuf_with_mask t.output_iobuf t.mask ~offset:0);
+     | `Client _ ->
+       (* The content window has been filled, so its window is empty at the end of the
+          payload. Flip it to expose exactly the payload bytes, mask them, then restore
+          the empty window. *)
+       Iobuf.flip_lo t.content_window;
+       xor_iobuf_with_mask t.content_window t.mask ~offset:0;
+       Iobuf.Lo_bound.restore new_lo t.content_window);
     (* Because [t.content_window] was originally made from [t.output_iobuf], we can set
        the [lo] of [t.output_iobuf] to the [lo] of [t.content_window] to effectively
        advance [t.output_buf] by [content_len] *)
-    let new_lo = Iobuf.Lo_bound.window t.content_window in
     Iobuf.Lo_bound.restore new_lo t.output_iobuf
   ;;
 end
@@ -271,7 +277,7 @@ module Frame_reader = struct
     end
 
     val payload_length : t -> Payload_length.t
-    val masked : local_ t -> bool
+    val masked : t @ local -> bool
   end = struct
     type t = int
 
@@ -340,7 +346,7 @@ module Frame_reader = struct
 
     val consume
       :  header_part2:Header_part2.t
-      -> iobuf:local_ (read, Iobuf.seek, Iobuf.global) Iobuf.t
+      -> iobuf:(read, Iobuf.seek, Iobuf.global) Iobuf.t @ local
       -> t
 
     val meaning : t -> Meaning.packed
@@ -391,9 +397,9 @@ module Frame_reader = struct
 
   module Mask : sig
     val consume
-      :  header_part2:local_ Header_part2.t
-      -> mask:local_ Bytes.t
-      -> local_ (read, Iobuf.seek, Iobuf.global) Iobuf.t
+      :  header_part2:Header_part2.t @ local
+      -> mask:Bytes.t @ local
+      -> (read, Iobuf.seek, Iobuf.global) Iobuf.t @ local
       -> [ `Mask | `Incomplete_frame | `No_mask_needed ]
   end = struct
     let consume ~(local_ header_part2) ~(local_ mask) (local_ iobuf) =

@@ -10,10 +10,10 @@ type t =
       Otherwise the value of [partial_opcode] is set to [Continuation]. It's invalid for a
       frame opcode and we use that to indicate [None] to avoid allocation. *)
   ; content_handler :
-      content:local_ (read, Iobuf.no_seek, Iobuf.global) Iobuf.t
+      content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t @ local
       -> opcode:Opcode.t
       -> unit
-  ; ping_handler : content:local_ (read, Iobuf.no_seek, Iobuf.global) Iobuf.t -> unit
+  ; ping_handler : content:(read, Iobuf.no_seek, Iobuf.global) Iobuf.t @ local -> unit
   ; close_handler :
       code:Connection_close_reason.t
       -> reason:string

@@ -21,9 +21,17 @@ end
 (** [create ?opcode ~role reader writer] creates a websocket connection.
 
     The websocket accepts any type of incoming frame and only writes frames of type
-    [opcode]. *)
+    [opcode].
+
+    By default the receive pipe is filled without pushback, so a consumer that reads more
+    slowly than frames arrive causes the pipe to grow (without bound). Pass
+    [~apply_pushback:true] to instead stop reading from the underlying [reader] until the
+    consumer has drained the receive pipe. This propagates backpressure down to TCP and
+    bounds buffering, at the cost of not reading ahead of the consumer (note that control
+    frames such as pings will also not be processed while reads are paused). *)
 val create
-  :  ?opcode:[ `Text | `Binary ]
+  :  ?apply_pushback:bool (** default: [false] *)
+  -> ?opcode:[ `Text | `Binary ]
   -> role:Websocket_role.t
   -> Reader.t
   -> Writer.t
@@ -47,8 +55,13 @@ module Frame_content : sig
 end
 
 (** Similar to [create], but allows receiving and sending different types of websocket
-    frames. *)
-val create' : role:Websocket_role.t -> Reader.t -> Writer.t -> Frame_content.t t
+    frames. See [create] for the meaning of [apply_pushback]. *)
+val create'
+  :  ?apply_pushback:bool (** default: [false] *)
+  -> role:Websocket_role.t
+  -> Reader.t
+  -> Writer.t
+  -> Frame_content.t t
 
 (** Gets a pair of ['msg Pipe.{Reader,Writer}.t] that can be used to receieve and send
     websocket frames. *)
